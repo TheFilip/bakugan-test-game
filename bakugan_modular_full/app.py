@@ -153,10 +153,19 @@ class StoryModeApp:
         self.season_ban_settings = self.db.get_world_json("season_ban_settings", dict(SEASON_BAN_DEFAULTS)) or dict(SEASON_BAN_DEFAULTS)
         self.current_season_bans = self.db.get_world_json("current_season_bans", empty_season_ban_state(self.world_season)) or empty_season_ban_state(self.world_season)
         self.season_ban_history = self.db.get_world_json("season_ban_history", []) or []
+        self.age_progression_enabled = bool(self.db.get_world_int("age_progression_enabled", 0))
+        self.season_new_npcs = int(self.db.get_world_int("season_new_npcs", SEASON_NEW_NPCS_DEFAULT) or SEASON_NEW_NPCS_DEFAULT)
+        self.autosave_interval_seasons = max(1, int(self.db.get_world_int("autosave_interval_seasons", 5) or 5))
         self.npc_target_population = 192
         self.ensure_npc_universe()
         self.get_season_shop_stock()
 
+        self.text_to_ide_var = tk.BooleanVar(value=bool(self.db.get_world_int("text_to_ide_enabled", 1)))
+        self.txt_exports_var = tk.BooleanVar(value=bool(self.db.get_world_int("txt_exports_enabled", 1)))
+        self.debug_console_var = tk.BooleanVar(value=bool(self.db.get_world_int("debug_console_enabled", 1)))
+        set_text_output_to_ide_enabled(bool(self.text_to_ide_var.get()))
+        set_text_file_exports_enabled(bool(self.txt_exports_var.get()))
+        set_debug_console_text_enabled(bool(self.debug_console_var.get()))
         self.status_var = tk.StringVar(value="Create a character to begin.")
         self.build_ui()
 
@@ -165,45 +174,95 @@ class StoryModeApp:
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="Bakugan Story Mode", font=("Arial", 16, "bold")).pack(anchor="w")
-        debug_row = ttk.Frame(frm)
-        debug_row.pack(anchor="w", pady=(4, 10))
-        ttk.Checkbutton(debug_row, text="Debug mode", variable=self.debug_var).pack(side="left")
-        ttk.Button(debug_row, text="Changelog", command=self.view_changelog).pack(side="left", padx=(8, 0))
-        self.card_lab_button = ttk.Button(debug_row, text="Card Lab", command=self.open_card_lab)
-        self.npc_market_debug_check = ttk.Checkbutton(debug_row, text="NPC market debug", variable=self.npc_market_debug_var)
+        top_row = ttk.Frame(frm)
+        top_row.pack(anchor="w", pady=(4, 10), fill="x")
+        ttk.Button(top_row, text="Settings", command=self.open_settings).pack(side="left")
 
         ttk.Label(frm, textvariable=self.status_var, wraplength=700).pack(anchor="w", pady=(0, 10))
 
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=4)
-        ttk.Button(btns, text="New Character", command=self.new_character).grid(row=0, column=0, padx=4, pady=4)
-        ttk.Button(btns, text="View Loadout", command=self.view_loadout).grid(row=0, column=1, padx=4, pady=4)
-        ttk.Button(btns, text="Customise Loadout", command=self.customise_loadout).grid(row=0, column=2, padx=4, pady=4)
-        ttk.Button(btns, text="Shop", command=self.open_shop).grid(row=0, column=3, padx=4, pady=4)
-        ttk.Button(btns, text="Binder", command=self.open_binder).grid(row=0, column=4, padx=4, pady=4)
-        ttk.Button(btns, text="Start Tournament", command=self.start_tournament).grid(row=0, column=5, padx=4, pady=4)
-        ttk.Button(btns, text="NPC Rankings", command=self.view_npc_rankings).grid(row=0, column=6, padx=4, pady=4)
-        ttk.Button(btns, text="Search Profile", command=self.search_profile_loadout).grid(row=0, column=7, padx=4, pady=4)
-        ttk.Button(btns, text="Tournament History", command=self.view_tournament_history).grid(row=0, column=8, padx=4, pady=4)
-        self.season_rules_button = ttk.Button(btns, text="Season Rules", command=self.view_season_rules)
-        self.season_rules_button.grid(row=0, column=9, padx=4, pady=4)
-        ttk.Button(btns, text="Season Summary", command=self.view_season_summary).grid(row=0, column=10, padx=4, pady=4)
-        ttk.Button(btns, text="Save Game", command=self.save_character_json).grid(row=0, column=11, padx=4, pady=4)
-        ttk.Button(btns, text="Load Game", command=self.load_character_json).grid(row=0, column=12, padx=4, pady=4)
-        ttk.Button(btns, text="Card Reference", command=self.view_card_reference).grid(row=0, column=13, padx=4, pady=4)
-        self.world_cup_button = ttk.Button(btns, text="World Cup Settings", command=self.configure_world_cup)
-        self.world_cup_button.grid(row=0, column=14, padx=4, pady=4)
-        self.ban_settings_button = ttk.Button(btns, text="Ban Settings", command=self.configure_season_bans)
-        self.ban_settings_button.grid(row=0, column=15, padx=4, pady=4)
-        ttk.Button(btns, text="Export NPC Loadouts", command=self.export_npc_loadouts).grid(row=0, column=16, padx=4, pady=4)
-        self.auto_season_button = ttk.Button(btns, text="Auto Rest of Season", command=self.auto_rest_of_season)
-        self.auto_season_button.grid(row=0, column=17, padx=4, pady=4)
+        for col in range(5):
+            btns.columnconfigure(col, weight=1)
+
+        button_specs = [
+            ("new_character_button", "New Character", self.new_character),
+            ("view_loadout_button", "View Loadout", self.view_loadout),
+            ("customise_loadout_button", "Customise Loadout", self.customise_loadout),
+            ("shop_button", "Shop", self.open_shop),
+            ("binder_button", "Binder", self.open_binder),
+            ("start_tournament_button", "Start Tournament", self.start_tournament),
+            (None, "NPC Rankings", self.view_npc_rankings),
+            (None, "Search Profile", self.search_profile_loadout),
+            (None, "Tournament History", self.view_tournament_history),
+            ("season_rules_button", "Season Rules", self.view_season_rules),
+            (None, "Season Summary", self.view_season_summary),
+            ("retire_button", "Retire Character", self.retire_character),
+            (None, "Save Game", self.save_character_json),
+            (None, "Load Game", self.load_character_json),
+            (None, "Card Reference", self.view_card_reference),
+            ("auto_season_button", "Auto Rest of Season", self.auto_rest_of_season),
+            ("auto_seasons_x_button", "Auto Rest x Seasons", self.auto_rest_x_seasons),
+        ]
+        for idx, (attr_name, label, command) in enumerate(button_specs):
+            row = idx // 5
+            column = idx % 5
+            btn = ttk.Button(btns, text=label, command=command)
+            btn.grid(row=row, column=column, padx=4, pady=4, sticky="ew")
+            if attr_name:
+                setattr(self, attr_name, btn)
 
         self.text = tk.Text(frm, width=110, height=30)
         self.text.pack(fill="both", expand=True)
         self.debug_var.trace_add('write', lambda *_: self.update_debug_controls())
         self.update_debug_controls()
+        self.update_player_button_visibility()
 
+    def league_band_for_rating(self, rating: float) -> Tuple[str, float, Optional[float]]:
+        if rating < 1200:
+            return ("Amateur", 800.0, 1200.0)
+        if rating < 1600:
+            return ("Semi-Pro", 1200.0, 1600.0)
+        if rating < 2000:
+            return ("Pro", 1600.0, 2000.0)
+        return ("Elite", 2000.0, None)
+
+    def league_band_label_for_rating(self, rating: float) -> str:
+        name, lo, hi = self.league_band_for_rating(rating)
+        if hi is None:
+            return f"{name} ({int(lo)}+)"
+        return f"{name} ({int(lo)}-{int(hi)})"
+
+    def profile_league_band(self, profile: PlayerProfile) -> str:
+        return self.league_band_for_rating(profile.glicko.rating)[0]
+
+    def update_player_button_visibility(self) -> None:
+        has_player = self.player is not None
+        for btn in (
+            getattr(self, "view_loadout_button", None),
+            getattr(self, "customise_loadout_button", None),
+            getattr(self, "shop_button", None),
+            getattr(self, "binder_button", None),
+            getattr(self, "retire_button", None),
+        ):
+            if btn is None:
+                continue
+            if has_player:
+                btn.grid()
+            else:
+                btn.grid_remove()
+
+    def retire_character(self) -> None:
+        if self.player is None:
+            messagebox.showerror("No character", "There is no active character to retire.", parent=self.root)
+            return
+        name = self.player.name
+        if not messagebox.askyesno("Retire Character", f"Retire {name} and continue the world without a player character?", parent=self.root):
+            return
+        self.player = None
+        self.update_player_button_visibility()
+        self.refresh_status()
+        self.append_text(f"Retired player character {name}. The world will continue with NPC-only tournaments.")
 
     def _load_raw_content_data(self) -> Tuple[List[dict], List[dict], List[dict]]:
         def _load_module(module_name: str, file_path: Path):
@@ -923,6 +982,251 @@ class StoryModeApp:
         refresh_tree()
         on_mode_change()
 
+    def open_settings(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("520x420")
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill="both", expand=True)
+
+        toggles = ttk.LabelFrame(outer, text="General")
+        toggles.pack(fill="x", pady=(0, 10))
+        ttk.Checkbutton(toggles, text="Debug Mode", variable=self.debug_var).pack(anchor="w", padx=8, pady=(8, 4))
+        ttk.Checkbutton(toggles, text="Text to IDE", variable=self.text_to_ide_var, command=self.on_output_toggle_changed).pack(anchor="w", padx=8, pady=4)
+        ttk.Checkbutton(toggles, text="Create TXTs", variable=self.txt_exports_var, command=self.on_output_toggle_changed).pack(anchor="w", padx=8, pady=4)
+        ttk.Checkbutton(toggles, text="Debug Text", variable=self.debug_console_var, command=self.on_output_toggle_changed).pack(anchor="w", padx=8, pady=4)
+        ttk.Checkbutton(toggles, text="NPC market debug", variable=self.npc_market_debug_var).pack(anchor="w", padx=8, pady=(4, 8))
+
+        actions = ttk.LabelFrame(outer, text="Tools")
+        actions.pack(fill="both", expand=True)
+
+        def add_button(row: int, col: int, label: str, command, enabled: bool = True):
+            btn = ttk.Button(actions, text=label, command=command)
+            btn.grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+            if not enabled:
+                btn.configure(state="disabled")
+            return btn
+
+        for col in range(2):
+            actions.columnconfigure(col, weight=1)
+
+        debug_on = bool(self.debug_var.get())
+        add_button(0, 0, "Changelog", self.view_changelog, True)
+        add_button(0, 1, "Card Lab", self.open_card_lab, debug_on)
+        add_button(1, 0, "Ban Settings", self.configure_season_bans, debug_on)
+        add_button(1, 1, "World Cup Settings", self.configure_world_cup, debug_on)
+        add_button(2, 0, "Export NPC Loadouts", self.export_npc_loadouts, True)
+        add_button(2, 1, "Autosave Settings", self.configure_autosave_settings, True)
+        add_button(3, 0, "Test Battle", self.open_debug_test_battle, debug_on)
+
+        note = "Card Lab, Ban Settings, World Cup Settings, and Test Battle require Debug Mode." if not debug_on else ""
+        if note:
+            ttk.Label(outer, text=note, wraplength=480).pack(anchor="w", pady=(8, 0))
+
+    def configure_autosave_settings(self) -> None:
+        current = int(getattr(self, "autosave_interval_seasons", 5) or 5)
+        value = simpledialog.askinteger(
+            "Autosave Settings",
+            "Force autosave every how many seasons?",
+            parent=self.root,
+            initialvalue=current,
+            minvalue=1,
+            maxvalue=999,
+        )
+        if value is None:
+            return
+        self.autosave_interval_seasons = max(1, int(value))
+        self.db.set_world_int("autosave_interval_seasons", self.autosave_interval_seasons)
+        self.append_text(f"Forced autosave interval set to every {self.autosave_interval_seasons} seasons.")
+
+    def _debug_battle_profiles(self) -> List[PlayerProfile]:
+        profiles = list(self.all_npcs())
+        if self.player is not None:
+            profiles = [p for p in profiles if p.name != self.player.name] + [self.player]
+        return sorted(profiles, key=lambda p: (-p.glicko.rating, p.name.lower()))
+
+    def open_debug_test_battle(self) -> None:
+        if not bool(self.debug_var.get()):
+            return
+        profiles = self._debug_battle_profiles()
+        if len(profiles) < 2:
+            messagebox.showinfo("Test Battle", "Need at least two profiles to run a test battle.", parent=self.root)
+            return
+
+        by_name = {p.name: p for p in profiles}
+        win = tk.Toplevel(self.root)
+        win.title("Debug Test Battle")
+        win.geometry("560x360")
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(1, weight=1)
+
+        names = [p.name for p in profiles]
+        p1_var = tk.StringVar(value=names[0])
+        p2_var = tk.StringVar(value=names[1] if len(names) > 1 else names[0])
+        seed_var = tk.StringVar(value=str(self.world_seed or self.rng.randint(1, 2_000_000_000)))
+        log_var = tk.BooleanVar(value=True)
+
+        ttk.Label(outer, text="Player 1").grid(row=0, column=0, sticky="w", pady=4)
+        p1_box = ttk.Combobox(outer, textvariable=p1_var, values=names)
+        p1_box.grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Label(outer, text="Player 2").grid(row=1, column=0, sticky="w", pady=4)
+        p2_box = ttk.Combobox(outer, textvariable=p2_var, values=names)
+        p2_box.grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(outer, text="Seed").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(outer, textvariable=seed_var).grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Checkbutton(outer, text="Write play-by-play file", variable=log_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 10))
+
+        info = tk.Text(outer, width=60, height=10)
+        info.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(4, 8))
+        outer.rowconfigure(4, weight=1)
+
+        def _filter_names(combo: ttk.Combobox, variable: tk.StringVar) -> None:
+            query = variable.get().strip().lower()
+            filtered = [name for name in names if query in name.lower()]
+            combo["values"] = filtered or names
+
+        def _resolve_profile(name: str) -> Optional[PlayerProfile]:
+            exact = by_name.get(name)
+            if exact is not None:
+                return exact
+            query = name.strip().lower()
+            if not query:
+                return None
+            matches = [p for p in profiles if query in p.name.lower()]
+            if len(matches) == 1:
+                return matches[0]
+            return None
+
+        def refresh_preview(*_):
+            p1 = _resolve_profile(p1_var.get())
+            p2 = _resolve_profile(p2_var.get())
+            lines = []
+            for prof in (p1, p2):
+                if prof is None:
+                    continue
+                prof.ensure_valid_loadout()
+                bak = ", ".join(f"{b.name} ({b.attribute.value}, {b.base_g}G)" for b in prof.active_bakugan()) or "None"
+                gates = ", ".join(f"{g.name} [{g.gate_type.value}]" for g in prof.active_gates()) or "None"
+                abilities = ", ".join(f"{a.name} [{a.color.value}]" for a in prof.active_abilities()) or "None"
+                lines.append(f"{prof.name} | Rating {prof.glicko.rating:.0f}")
+                lines.append(f"Bakugan: {bak}")
+                lines.append(f"Gates: {gates}")
+                lines.append(f"Abilities: {abilities}")
+                lines.append("")
+            info.configure(state="normal")
+            info.delete("1.0", "end")
+            info.insert("1.0", "\n".join(lines).strip())
+
+            info.configure(state="disabled")
+
+        def _on_name_change(*_):
+            _filter_names(p1_box, p1_var)
+            _filter_names(p2_box, p2_var)
+            refresh_preview()
+
+        p1_var.trace_add("write", _on_name_change)
+        p2_var.trace_add("write", _on_name_change)
+        refresh_preview()
+
+        def run_test_battle() -> None:
+            p1 = _resolve_profile(p1_var.get().strip())
+            p2 = _resolve_profile(p2_var.get().strip())
+            if p1 is None or p2 is None or p1.name == p2.name:
+                messagebox.showerror("Test Battle", "Choose two different valid players. You can type to narrow the list.", parent=win)
+                return
+            try:
+                seed = int(seed_var.get().strip())
+            except Exception:
+                messagebox.showerror("Test Battle", "Seed must be a whole number.", parent=win)
+                return
+            forced_log = bool(log_var.get())
+            previous_txt_setting = is_text_file_exports_enabled()
+            try:
+                if forced_log and not previous_txt_setting:
+                    set_text_file_exports_enabled(True)
+                winner, perf, _match, path = run_single_match(p1, p2, seed=seed, verbose=True, log_to_file=forced_log)
+            finally:
+                if forced_log and not previous_txt_setting:
+                    set_text_file_exports_enabled(previous_txt_setting)
+            lines = [
+                f"Test battle: {p1.name} vs {p2.name}",
+                f"Winner: {winner.name}",
+                f"{p1.name}: perf {perf[p1.name]:.1f}",
+                f"{p2.name}: perf {perf[p2.name]:.1f}",
+            ]
+            if forced_log:
+                if path is not None:
+                    lines.append(f"Saved play-by-play to {path}")
+                else:
+                    lines.append("Play-by-play file was requested but was not saved.")
+            self.append_text("\n".join(lines))
+
+            messagebox.showinfo("Test Battle", "\n".join(lines), parent=win)
+
+
+        btns = ttk.Frame(outer)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e")
+        ttk.Button(btns, text="Run Test Battle", command=run_test_battle).pack(side="left", padx=4)
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="left", padx=4)
+
+    def _export_db_state(self) -> Dict[str, object]:
+        profiles = [serialize_profile(p) for p in self.db.load_all_profiles()]
+        world_rows = self.db.conn.execute("SELECT key, value FROM world_state").fetchall()
+        archives = self.db.load_tournament_archives()
+        return {
+            "profiles": profiles,
+            "world_state": {str(k): str(v) for k, v in world_rows},
+            "tournament_archives": archives,
+        }
+
+    def _import_db_state(self, snapshot: Dict[str, object]) -> None:
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        self.db.reset_world()
+        profiles = snap.get("profiles", []) or []
+        restored_profiles = []
+        for item in profiles:
+            try:
+                restored_profiles.append(deserialize_profile(item))
+            except Exception:
+                continue
+        if restored_profiles:
+            self.db.save_profiles(restored_profiles)
+        world_state = snap.get("world_state", {}) or {}
+        if isinstance(world_state, dict):
+            for key, value in world_state.items():
+                self.db.conn.execute(
+                    "REPLACE INTO world_state (key, value) VALUES (?, ?)",
+                    (str(key), str(value)),
+                )
+        archives = snap.get("tournament_archives", []) or []
+        for archive in archives:
+            try:
+                self.db.save_tournament_archive(archive)
+            except Exception:
+                pass
+        self.db.conn.commit()
+
+    def _build_save_payload(self) -> Dict:
+        db_state = self._export_db_state()
+        if self.player is None:
+            payload = serialize_world_savegame(
+                self.world_season,
+                self.world_tournament_no,
+                self.world_total_tournaments,
+                self.world_seed,
+            )
+        else:
+            payload = serialize_savegame(
+                self.player,
+                self.world_season,
+                self.world_tournament_no,
+                self.world_total_tournaments,
+                self.world_seed,
+            )
+        payload["db_state"] = db_state
+        return payload
+
     def view_changelog(self) -> None:
         win = tk.Toplevel(self.root)
         win.title(f"Changelog {CHANGELOG_VERSION}")
@@ -944,49 +1248,29 @@ class StoryModeApp:
     def update_debug_controls(self) -> None:
         debug_on = bool(self.debug_var.get())
         try:
-            self.world_cup_button.configure(state=("normal" if debug_on else "disabled"))
+            self.auto_season_button.configure(state="normal")
         except Exception:
             pass
         try:
-            self.ban_settings_button.configure(state=("normal" if debug_on and bool(self.season_ban_settings.get("enabled")) else "disabled"))
+            self.auto_seasons_x_button.configure(state="normal")
         except Exception:
             pass
-        try:
-            self.auto_season_button.configure(state=("normal" if debug_on else "enabled"))
-        except Exception:
-            pass
-        try:
-            if debug_on:
-                self.card_lab_button.pack(side="left", padx=(8, 0))
-                self.card_lab_button.configure(state="normal")
-                self.npc_market_debug_check.pack(side="left", padx=(8, 0))
-                self.npc_market_debug_check.configure(state="normal")
-            else:
-                self.npc_market_debug_var.set(False)
-                self.npc_market_debug_check.pack_forget()
-                self.npc_market_debug_check.configure(state="disabled")
-                self.card_lab_button.pack_forget()
-                self.card_lab_button.configure(state="disabled")
-        except Exception:
-            pass
+        if not debug_on:
+            self.npc_market_debug_var.set(False)
 
     def auto_rest_of_season(self) -> None:
-        if not self.require_player():
-            return
-        #if not bool(self.debug_var.get()):
-            #messagebox.showerror("Debug only", "Enable Debug mode to use Auto Rest of Season.", parent=self.root)
-            #return
-        if not profile_active_loadout_is_legal_exact(self.player):
-            messagebox.showerror("Illegal loadout", "Your active loadout is not legal. Change your loadout before using Auto Rest of Season.", parent=self.root)
-            return
-        if profile_uses_banned_active(self.player, self.current_season_bans):
-            messagebox.showerror("Banned loadout", "Your active loadout contains season-banned items. Change your loadout before using Auto Rest of Season.", parent=self.root)
-            return
+        if self.player is not None:
+            if not profile_active_loadout_is_legal_exact(self.player):
+                messagebox.showerror("Illegal loadout", "Your active loadout is not legal. Change your loadout before using Auto Rest of Season.", parent=self.root)
+                return
+            if profile_uses_banned_active(self.player, self.current_season_bans):
+                messagebox.showerror("Banned loadout", "Your active loadout contains season-banned items. Change your loadout before using Auto Rest of Season.", parent=self.root)
+                return
         debug_on = bool(self.debug_var.get())
         stdout_buffer = io.StringIO()
         stderr_buffer = io.StringIO()
-        output_ctx = contextlib.nullcontext() if debug_on else contextlib.ExitStack()
-        if not debug_on:
+        output_ctx = contextlib.nullcontext() if debug_on or not is_text_output_to_ide_enabled() else contextlib.ExitStack()
+        if (not debug_on) and is_text_output_to_ide_enabled():
             output_ctx.enter_context(contextlib.redirect_stdout(stdout_buffer))
             output_ctx.enter_context(contextlib.redirect_stderr(stderr_buffer))
         with output_ctx:
@@ -1000,7 +1284,21 @@ class StoryModeApp:
                 if self.world_total_tournaments == before_total and self.world_tournament_no == before_event and self.world_season == before_season:
                     break
 
+    def auto_rest_x_seasons(self) -> None:
+        count = simpledialog.askinteger("Auto Rest x Seasons", "How many seasons should be simulated?", parent=self.root, minvalue=1, maxvalue=250)
+        if not count:
+            return
+        target_season = self.world_season + int(count)
+        while self.world_season < target_season:
+            before = (self.world_season, self.world_tournament_no, self.world_total_tournaments)
+            self.auto_rest_of_season()
+            after = (self.world_season, self.world_tournament_no, self.world_total_tournaments)
+            if after == before:
+                break
+
     def append_text(self, text: str) -> None:
+        if not is_text_output_to_ide_enabled():
+            return
         self.text.insert("end", text + "\n")
         self.text.see("end")
 
@@ -1008,28 +1306,48 @@ class StoryModeApp:
         if bool(self.debug_var.get()) and bool(self.npc_market_debug_var.get()):
             self.append_text(text)
 
+    def on_output_toggle_changed(self) -> None:
+        enabled_ide = bool(self.text_to_ide_var.get())
+        enabled_txt = bool(self.txt_exports_var.get())
+        enabled_console = bool(self.debug_console_var.get())
+        set_text_output_to_ide_enabled(enabled_ide)
+        set_text_file_exports_enabled(enabled_txt)
+        set_debug_console_text_enabled(enabled_console)
+        try:
+            self.db.set_world_int("text_to_ide_enabled", 1 if enabled_ide else 0)
+            self.db.set_world_int("txt_exports_enabled", 1 if enabled_txt else 0)
+            self.db.set_world_int("debug_console_enabled", 1 if enabled_console else 0)
+        except Exception:
+            pass
+
     def require_player(self) -> bool:
         if self.player is None:
             messagebox.showerror("No character", "Create a character first.", parent=self.root)
             return False
         return True
 
+
     def refresh_status(self) -> None:
+        try:
+            self.update_player_button_visibility()
+        except Exception:
+            pass
         champion_name = "None"
         if isinstance(self.current_world_champion, dict):
             champion_name = str(self.current_world_champion.get("name") or "None")
         if not self.player:
             bans_label = self.current_ban_summary()
             self.status_var.set(
-                f"Create a character to begin. World season {self.world_season}, event {self.world_tournament_no}, total events {self.world_total_tournaments}, NPCs {len(self.db.load_all_profiles())} | World Cup every {self.world_cup_interval} seasons | World Champion {champion_name} | {bans_label}"
+                f"No active player character | World season {self.world_season}, event {self.world_tournament_no}, total events {self.world_total_tournaments}, NPCs {len(self.db.load_all_profiles())} | World Cup every {self.world_cup_interval} seasons | World Champion {champion_name} | {bans_label}"
             )
             return
         self.player.update_career_stage()
         champ_tag = " | World Champion" if self.is_world_champion(self.player) else ""
-        age_tag = f" | Age {profile_age(self.player)}" if self.age_progression_enabled else ""
+        age_tag = f" | Age {profile_age(self.player)}" if getattr(self, "age_progression_enabled", False) else ""
+        league_name = self.league_band_label_for_rating(self.player.glicko.rating)
         self.status_var.set(
             f"{self.player.name}{champ_tag}{age_tag} | {self.player.chosen_attribute.value} | £{self.player.money} | "
-            f"Rating {self.player.glicko.rating:.0f} | Stage {self.display_title(self.player)} | "
+            f"Rating {self.player.glicko.rating:.0f} | League {league_name} | Stage {self.display_title(self.player)} | "
             f"Titles {self.player.tournament_titles} | Podiums {self.player.podiums} | "
             f"Entered {self.player.tournaments_entered} | Season {self.world_season} Event {self.world_tournament_no} | Total Events {self.world_total_tournaments} | "
             f"World Cup every {self.world_cup_interval} seasons | World Champion {champion_name} | {self.current_ban_summary()}"
@@ -1428,7 +1746,7 @@ class StoryModeApp:
             weights = []
             for name in remaining:
                 use = float(usage.get(name, 0.0))
-                weights.append(max(0.1, 1.0 + use * use * 3.0 + use * 6.0))
+                weights.append(max(0.1, 1.0 + use * use * 6.0 + use * 12.0))
             total = sum(weights)
             pick = rng.random() * total
             run = 0.0
@@ -1754,6 +2072,42 @@ class StoryModeApp:
             self.append_text(block[start:start + chunk_size])
 
 
+    def _world_cup_manual_state_text(self, season_no: int, entrants: List[PlayerProfile], table: Dict[str, Dict[str, float]], records: List[Dict[str, object]], viewer_name: Optional[str] = None) -> str:
+        standings = self._build_world_cup_standings(entrants, table, records)
+        lines = [
+            f"{WORLD_CUP_TOURNAMENT_LABEL} Tournament standings",
+            f"Season: {season_no}",
+            f"Format: Double Round Robin",
+            f"Matches completed: {len(records)} / {len(entrants) * (len(entrants) - 1)}",
+        ]
+        if viewer_name:
+            viewer = next((p for p in standings if p.name == viewer_name), None)
+            if viewer is not None:
+                viewer_stats = table.get(viewer.name, {})
+                matches_played = max(1.0, float(viewer_stats.get("matches", 0.0) or 0.0))
+                avg_perf = float(viewer_stats.get("perf_total", 0.0) or 0.0) / matches_played if viewer_stats.get("matches", 0.0) else 0.0
+                place = next((idx for idx, p in enumerate(standings, start=1) if p.name == viewer_name), None)
+                lines.extend([
+                    "",
+                    "You are participating in the World Cup Tournament.",
+                    f"Current position: {place}",
+                    f"Points: {int(viewer_stats.get('points', 0))}",
+                    f"Wins/Losses: {int(viewer_stats.get('wins', 0))}/{int(viewer_stats.get('losses', 0))}",
+                    f"Gate diff: {int(viewer_stats.get('gate_diff', 0))}",
+                    f"Average performance: {avg_perf:.1f}",
+                    f"Rating: {viewer.glicko.rating:.1f}",
+                ])
+        lines.append("")
+        lines.append("Top standings")
+        for idx, prof in enumerate(standings, start=1):
+            stats = table.get(prof.name, {})
+            matches_played = float(stats.get("matches", 0.0) or 0.0)
+            avg_perf = float(stats.get("perf_total", 0.0) or 0.0) / matches_played if matches_played else 0.0
+            lines.append(
+                f"{idx}. {prof.name} | Pts {int(stats.get('points', 0))} | W-L {int(stats.get('wins', 0))}-{int(stats.get('losses', 0))} | H2H {int(stats.get('head_to_head_points', 0))} | GateDiff {int(stats.get('gate_diff', 0))} | AvgPerf {avg_perf:.1f} | Rating {prof.glicko.rating:.1f}"
+            )
+        return "\n".join(lines)
+
     def _export_world_cup_files(self, season_no: int, entrants: List[PlayerProfile], standings: List[Tuple[PlayerProfile, Dict[str, float]]], records: List[Dict[str, object]], play_logs: List[str]) -> Tuple[Path, Path]:
         suffix_rng = random.Random(self.world_seed + season_no * 7919 + len(records))
         summary_path = get_current_output_dir() / build_output_filename("world_cup", len(entrants), len(records), random_suffix(suffix_rng))
@@ -1774,12 +2128,12 @@ class StoryModeApp:
             lines.append("")
             lines.append(f"{pos}. {prof.name}")
             lines.extend(player_loadout_lines(prof, "   "))
-        summary_path.write_text("\n".join(lines), encoding="utf-8")
+        summary_path = maybe_write_text(summary_path, "\n".join(lines), encoding="utf-8") or summary_path
 
         play_path = get_current_output_dir() / build_output_filename("world_cup_playbyplay", len(entrants), len(records), random_suffix(random.Random(self.world_seed + season_no * 12347)))
         text_lines = [f"========== {WORLD_CUP_TOURNAMENT_LABEL.upper()} PLAY BY PLAY =========="]
         text_lines.extend(play_logs)
-        play_path.write_text("\n".join(text_lines), encoding="utf-8")
+        play_path = maybe_write_text(play_path, "\n".join(text_lines), encoding="utf-8") or play_path
         return summary_path, play_path
 
 
@@ -1789,7 +2143,16 @@ class StoryModeApp:
         if len(entrants) < 8:
             return
 
+        player_qualified = self.player is not None and any(p.name == self.player.name for p in entrants)
+        if self.player is not None and not player_qualified:
+            player_rank = next((idx for idx, prof in enumerate(ranked, start=1) if prof.name == self.player.name), None)
+            if player_rank is not None:
+                self.append_text(
+                    f"{WORLD_CUP_TOURNAMENT_LABEL}: you did not qualify this season. Your world ranking was #{player_rank}. Top 8 qualify."
+                )
+
         # World Cup ignores seasonal bans. Re-optimise entrants without ban restrictions.
+        # Keep the user player's chosen loadout intact and let them adjust it before the event.
         unrestricted_snapshots = {}
         for prof in entrants:
             unrestricted_snapshots[prof.name] = {
@@ -1797,7 +2160,34 @@ class StoryModeApp:
                 "gates": list(prof.active_gate_idx),
                 "abilities": list(prof.active_ability_idx),
             }
+            if self.player is not None and prof.name == self.player.name:
+                prof.ensure_valid_loadout()
+                continue
             optimise_profile_loadout(prof, rng=self.rng)
+
+        manual = False
+        handler = None
+        if player_qualified:
+            self.append_text(f"You qualified for and are participating in the {WORLD_CUP_TOURNAMENT_LABEL} Tournament.")
+            change_loadout = messagebox.askyesno(
+                f"{WORLD_CUP_TOURNAMENT_LABEL} Tournament",
+                "You qualified for the World Cup Tournament. Do you want to review or change your active loadout before your first World Cup match?",
+                parent=self.root,
+            )
+            if change_loadout:
+                self.customise_loadout()
+                if self.player is not None:
+                    self.player.ensure_valid_loadout()
+                self.refresh_status()
+                self.append_text(f"Using your chosen active loadout for the {WORLD_CUP_TOURNAMENT_LABEL} Tournament.")
+            else:
+                self.append_text(f"Keeping your current active loadout for the {WORLD_CUP_TOURNAMENT_LABEL} Tournament.")
+            manual = messagebox.askyesno(
+                f"{WORLD_CUP_TOURNAMENT_LABEL} Tournament",
+                "You qualified for the World Cup Tournament. Play your World Cup matches in manual mode?\n\nDuring manual prompts, type AUTO to simulate the rest of the tournament automatically.",
+                parent=self.root,
+            )
+            handler = TkManualChoiceHandler(self.root) if manual else None
 
         debug = bool(self.debug_var.get())
         logger = Logger(enabled=debug, prefix="world_cup")
@@ -1811,16 +2201,30 @@ class StoryModeApp:
         records: List[Dict[str, object]] = []
         play_logs: List[str] = []
 
+        if handler is not None and hasattr(handler, "set_tournament_state_provider"):
+            handler.set_tournament_state_provider(lambda viewer_name=None: self._world_cup_manual_state_text(season_no, entrants, table, records, viewer_name))
+
         round_no = 1
         for p1, p2 in combinations(entrants, 2):
             for leg in (1, 2):
                 match_logger = Logger(enabled=debug, prefix="match")
+                manual_player_name = None
+                match_handler = None
+                if handler is not None and not getattr(handler, "auto_rest", False):
+                    if p1.name == self.player.name:
+                        manual_player_name = p1.name
+                        match_handler = handler
+                    elif p2.name == self.player.name:
+                        manual_player_name = p2.name
+                        match_handler = handler
                 match = Match(
                     p1,
                     p2,
                     seed=self.rng.randint(1, 10_000_000),
                     verbose=debug,
                     logger=match_logger,
+                    manual_handler=match_handler,
+                    manual_player_name=manual_player_name,
                 )
                 winner, perf, lines = match.play()
                 for match_player in match.players:
@@ -1863,6 +2267,9 @@ class StoryModeApp:
                 play_logs.append(f"========== ROUND ROBIN SET {round_no} | LEG {leg} | {p1.name} vs {p2.name} ==========")
                 play_logs.extend(lines)
             round_no += 1
+
+        if handler is not None and hasattr(handler, "set_tournament_state_provider"):
+            handler.set_tournament_state_provider(None)
 
         standings = self._build_world_cup_standings(entrants, table, records)
         tied_name_group = {p.name for p in entrants}
@@ -1950,9 +2357,9 @@ class StoryModeApp:
         prodigy_lines = self._future_prodigies_lines()
         if prodigy_lines:
             self.append_text("\n".join(prodigy_lines))
-        self.append_text(f"Saved World Cup summary to {summary_path}")
-        self.append_text(f"Saved World Cup play by play to {play_path}")
-
+        if is_text_file_exports_enabled():
+            self.append_text(f"Saved World Cup summary to {summary_path}")
+            self.append_text(f"Saved World Cup play by play to {play_path}")
 
 
     def add_new_npcs_after_world_cup(self, count: Optional[int] = None) -> List[PlayerProfile]:
@@ -1980,6 +2387,8 @@ class StoryModeApp:
         retired_names = []
         if self.player is not None:
             age_profile_one_season(self.player, self.rng)
+            self.player.update_career_stage()
+            self.player.update_signature()
         all_npcs = [p for p in self.db.load_all_profiles() if not p.is_human]
         for npc in all_npcs:
             if age_profile_one_season(npc, self.rng):
@@ -1991,6 +2400,13 @@ class StoryModeApp:
         self.npc_target_population = max(active_count + max(0, int(self.season_new_npcs)), self.npc_target_population)
         self.db.set_world_int('npc_target_population', self.npc_target_population)
         self.ensure_npc_universe()
+        if self.player is not None:
+            age_flags = self.player.story_flags if isinstance(self.player.story_flags, dict) else {}
+            self.append_text(
+                f"Season {new_season}: {self.player.name} is now age {profile_age(self.player)} | "
+                f"Peak age {int(age_flags.get('peak_age', profile_age(self.player)))} | "
+                f"Retirement age {int(age_flags.get('retirement_age', profile_age(self.player) + 10))}"
+            )
         if retired_names:
             self.append_text(f"Season {new_season}: retired players: {', '.join(retired_names[:12])}" + (" ..." if len(retired_names) > 12 else ""))
 
@@ -2173,7 +2589,7 @@ class StoryModeApp:
             player_tag = " | You" if self.player is not None and prof.name == self.player.name else ""
             champ_hist = self.get_world_champion_history_for_profile(prof)
             champ_hist_text = f" | WC Seasons {', '.join(str(s) for s in champ_hist)}" if champ_hist else ""
-            age_text = f" | Age {profile_age(prof)}" if self.age_progression_enabled else ""
+            age_text = f" | Age {profile_age(prof)}" if getattr(self, "age_progression_enabled", False) else ""
             lines.append(
                 f"{i:>2}. {prof.name}{age_text} | {self.display_title(prof)} | Rating {prof.glicko.rating:.0f} | "
                 f"Titles {prof.tournament_titles} | Podiums {prof.podiums} | Fame {prof.fame}{champ_hist_text} | "
@@ -2315,9 +2731,20 @@ class StoryModeApp:
 
 
     def search_profile_loadout(self) -> None:
-        profiles = list(self.all_npcs())
+        profiles = list(self.db.load_all_profiles())
         if self.player is not None:
-            profiles = [p for p in profiles if p.name != self.player.name] + [self.player]
+            replaced = False
+            merged = []
+            for p in profiles:
+                if p.name == self.player.name and bool(getattr(p, "is_human", False)):
+                    if not replaced:
+                        merged.append(self.player)
+                        replaced = True
+                else:
+                    merged.append(p)
+            if not replaced:
+                merged.append(self.player)
+            profiles = merged
 
         public_sort_options = [
             "world ranking", "rating", "peak rating", "titles", "finals", "podiums", "top8s", "fame",
@@ -2334,6 +2761,9 @@ class StoryModeApp:
             return (primary, profile.glicko.rating, profile.tournament_titles, profile.fame, -profile.losses, profile.name.lower())
 
         def ranked_profiles(sort_mode: str) -> List[PlayerProfile]:
+            if sort_mode == "world ranking":
+                live_profiles = [p for p in profiles if not profile_is_retired(p)]
+                return sorted(live_profiles, key=lambda p: stat_tuple(p, p.glicko.rating), reverse=True)
             if sort_mode == "rating":
                 return sorted(profiles, key=lambda p: stat_tuple(p, p.glicko.rating), reverse=True)
             if sort_mode == "peak rating":
@@ -2378,50 +2808,51 @@ class StoryModeApp:
 
         def list_label(profile: PlayerProfile, sort_mode: str, latest_ranked: List[PlayerProfile]) -> str:
             player_tag = " | You" if self.player is not None and profile.name == self.player.name else ""
+            retired_tag = " | Retired" if profile_is_retired(profile) else ""
             if sort_mode == "world ranking":
                 rank_no = latest_ranked.index(profile) + 1
-                return f"#{rank_no} {profile.name}{player_tag}"
+                return f"#{rank_no} {profile.name}{retired_tag}{player_tag}"
             if sort_mode == "rating":
-                return f"{profile.name} | Rating {profile.glicko.rating:.0f}{player_tag}"
+                return f"{profile.name} | Rating {profile.glicko.rating:.0f}{retired_tag}{player_tag}"
             if sort_mode == "peak rating":
-                return f"{profile.name} | Peak {profile.peak_rating:.0f}{player_tag}"
+                return f"{profile.name} | Peak {profile.peak_rating:.0f}{retired_tag}{player_tag}"
             if sort_mode == "titles":
-                return f"{profile.name} | Titles {profile.tournament_titles}{player_tag}"
+                return f"{profile.name} | Titles {profile.tournament_titles}{retired_tag}{player_tag}"
             if sort_mode == "finals":
-                return f"{profile.name} | Finals {profile.finals}{player_tag}"
+                return f"{profile.name} | Finals {profile.finals}{retired_tag}{player_tag}"
             if sort_mode == "podiums":
-                return f"{profile.name} | Podiums {profile.podiums}{player_tag}"
+                return f"{profile.name} | Podiums {profile.podiums}{retired_tag}{player_tag}"
             if sort_mode == "top8s":
-                return f"{profile.name} | Top8s {profile.top8s}{player_tag}"
+                return f"{profile.name} | Top8s {profile.top8s}{retired_tag}{player_tag}"
             if sort_mode == "fame":
-                return f"{profile.name} | Fame {profile.fame}{player_tag}"
+                return f"{profile.name} | Fame {profile.fame}{retired_tag}{player_tag}"
             if sort_mode == "wins":
-                return f"{profile.name} | Wins {profile.wins}{player_tag}"
+                return f"{profile.name} | Wins {profile.wins}{retired_tag}{player_tag}"
             if sort_mode == "losses":
-                return f"{profile.name} | Losses {profile.losses}{player_tag}"
+                return f"{profile.name} | Losses {profile.losses}{retired_tag}{player_tag}"
             if sort_mode == "win rate":
-                return f"{profile.name} | Win Rate {safe_win_rate(profile) * 100:.1f}%{player_tag}"
+                return f"{profile.name} | Win Rate {safe_win_rate(profile) * 100:.1f}%{retired_tag}{player_tag}"
             if sort_mode == "tournaments":
-                return f"{profile.name} | Tournaments {profile.tournaments_entered}{player_tag}"
+                return f"{profile.name} | Tournaments {profile.tournaments_entered}{retired_tag}{player_tag}"
             if sort_mode == "career earnings":
-                return f"{profile.name} | Earnings {profile.career_earnings}{player_tag}"
+                return f"{profile.name} | Earnings {profile.career_earnings}{retired_tag}{player_tag}"
             if sort_mode == "money":
-                return f"{profile.name} | Money {profile.money}{player_tag}"
+                return f"{profile.name} | Money {profile.money}{retired_tag}{player_tag}"
             if sort_mode == "training points":
-                return f"{profile.name} | Training {profile.training_points}{player_tag}"
+                return f"{profile.name} | Training {profile.training_points}{retired_tag}{player_tag}"
             if sort_mode == "sponsorship":
-                return f"{profile.name} | Sponsorship {profile.sponsorship}{player_tag}"
+                return f"{profile.name} | Sponsorship {profile.sponsorship}{retired_tag}{player_tag}"
             if sort_mode == "age":
-                return f"{profile.name} | Age {profile_age(profile)}{player_tag}"
+                return f"{profile.name} | Age {profile_age(profile)}{retired_tag}{player_tag}"
             if sort_mode == "roll":
-                return f"{profile.name} | Roll {profile.rolling_skill:.2f}{player_tag}"
+                return f"{profile.name} | Roll {profile.rolling_skill:.2f}{retired_tag}{player_tag}"
             if sort_mode == "int":
-                return f"{profile.name} | Int {profile.intelligence:.2f}{player_tag}"
+                return f"{profile.name} | Int {profile.intelligence:.2f}{retired_tag}{player_tag}"
             if sort_mode == "aggression":
-                return f"{profile.name} | Agg {profile.aggression:.2f}{player_tag}"
+                return f"{profile.name} | Agg {profile.aggression:.2f}{retired_tag}{player_tag}"
             if sort_mode == "risk":
-                return f"{profile.name} | Risk {profile.risk:.2f}{player_tag}"
-            return f"{profile.name}{player_tag}"
+                return f"{profile.name} | Risk {profile.risk:.2f}{retired_tag}{player_tag}"
+            return f"{profile.name}{retired_tag}{player_tag}"
 
         win = tk.Toplevel(self.root)
         win.title("Search Profile Loadout")
@@ -2469,6 +2900,38 @@ class StoryModeApp:
         ttk.Label(controls, text="Max Age").pack(side="left", padx=(10, 0))
         max_age_var = tk.StringVar(value="")
         ttk.Entry(controls, textvariable=max_age_var, width=6).pack(side="left", padx=(4, 0))
+        hide_retired_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(controls, text="Hide Retired", variable=hide_retired_var, command=lambda: refresh_list()).pack(side="left", padx=(10, 0))
+
+        def show_rank_titles() -> None:
+            win2 = tk.Toplevel(win)
+            win2.title("Career Title Ladder")
+            win2.geometry("420x420")
+            text = tk.Text(win2, width=48, height=22, wrap="word")
+            text.pack(fill="both", expand=True, padx=8, pady=8)
+            lines = [
+                "Career title ladder",
+                "",
+                "1. Grand Brawler",
+                "2. Master Brawler",
+                "3. International Brawler",
+                "4. National Brawler",
+                "5. Senior Champion",
+                "6. Champion",
+                "7. Expert",
+                "8. Candidate Expert",
+                "9. Senior Contender",
+                "10. Contender",
+                "11. Class A Brawler",
+                "12. Class B Brawler",
+                "13. Class C Brawler",
+                "14. Class D Brawler",
+                "15. Rookie",
+            ]
+            text.insert("1.0", "\n".join(lines))
+            text.configure(state="disabled")
+
+        ttk.Button(left, text="View Title Ladder", command=show_rank_titles).pack(anchor="w", pady=(0, 8))
 
         listbox = tk.Listbox(left, width=42, height=32)
         listbox.pack(fill="y", expand=True)
@@ -2489,6 +2952,11 @@ class StoryModeApp:
                 filtered = [p for p in latest_ranked if q in p.name.lower()]
             else:
                 filtered = latest_ranked[:]
+            if bool(hide_retired_var.get()):
+                filtered = [
+                    p for p in filtered
+                    if (not profile_is_retired(p)) or (bool(getattr(p, "is_human", False)) and q and q in p.name.lower())
+                ]
             if min_age is not None:
                 filtered = [p for p in filtered if profile_age(p) >= min_age]
             if max_age is not None:
@@ -2522,7 +2990,7 @@ class StoryModeApp:
             lines = [
                 f"{prof.name}{' | You' if self.player is not None and prof.name == self.player.name else ''}{' | Retired' if profile_is_retired(prof) else ''}",
                 f"World Rank #{world_rank if world_rank is not None else 'N/A'}",
-                f"Age {profile_age(prof)}" if self.age_progression_enabled else "",
+                f"Age {profile_age(prof)}" if getattr(self, "age_progression_enabled", False) else "",
                 f"Attribute {prof.chosen_attribute.value} | Style {prof.style.value} | Archetype {prof.archetype.value}",
                 f"Rating {prof.glicko.rating:.0f} | Peak {prof.peak_rating:.0f} | Titles {prof.tournament_titles} | Finals {prof.finals} | Podiums {prof.podiums} | Top8s {prof.top8s}",
                 f"Wins {prof.wins} | Losses {prof.losses} | Win Rate {win_rate:.1f}% | Tournaments {prof.tournaments_entered} | Fame {prof.fame}",
@@ -2633,7 +3101,8 @@ class StoryModeApp:
         display_items = []
         for arc in archives:
             event_label = "WC" if int(arc.get('event_no', 0)) == 0 and arc.get('tournament_type') == WORLD_CUP_TOURNAMENT_LABEL else f"E{int(arc['event_no']):03d}"
-            label = f"S{int(arc['season']):02d} {event_label} | {arc['tournament_type']} | {arc['participant_count']} players | Winner {arc.get('winner','?')}"
+            league_part = f" | {arc.get('league')}" if arc.get('league') else ""
+            label = f"S{int(arc['season']):02d} {event_label}{league_part} | {arc['tournament_type']} | {arc['participant_count']} players | Winner {arc.get('winner','?')}"
             display_items.append((label, arc['archive_id']))
             listbox.insert('end', label)
 
@@ -3048,6 +3517,27 @@ class StoryModeApp:
                 lines.append(f"{gt.value} Gate: {gate_vars[gt].get()}")
             for color in [AbilityColor.RED, AbilityColor.BLUE, AbilityColor.GREEN]:
                 lines.append(f"{color.value} Ability: {ability_vars[color].get()}")
+            bak = [parse_index(v.get()) for v in bak_vars]
+            gates = [parse_index(gate_vars[gt].get()) for gt in [GateType.GOLD, GateType.SILVER, GateType.BRONZE]]
+            abilities = [parse_index(ability_vars[c].get()) for c in [AbilityColor.RED, AbilityColor.BLUE, AbilityColor.GREEN]]
+            if all(x is not None for x in bak + gates + abilities) and len(set(bak)) == 3:
+                old_bak = list(self.player.active_bakugan_idx)
+                old_gate = list(self.player.active_gate_idx)
+                old_ability = list(self.player.active_ability_idx)
+                try:
+                    self.player.active_bakugan_idx = bak
+                    self.player.active_gate_idx = gates
+                    self.player.active_ability_idx = abilities
+                    score = score_active_loadout(self.player)
+                    lines.append("")
+                    lines.append(f"Loadout rating: {score['rating']}/100")
+                    lines.append(f"Synergy: {score['synergy']}/30")
+                    lines.append(f"Power: {score['power']}/50")
+                    lines.append(f"Flexibility: {score['flexibility']}/20")
+                finally:
+                    self.player.active_bakugan_idx = old_bak
+                    self.player.active_gate_idx = old_gate
+                    self.player.active_ability_idx = old_ability
             preview.configure(state="normal")
             preview.delete("1.0", "end")
             preview.insert("1.0", "\n".join(lines))
@@ -3329,22 +3819,36 @@ class StoryModeApp:
         ttk.Button(controls, text="Buy Item", command=buy).pack(side="left", padx=4, pady=4)
 
 
-    def autosave_current_game(self) -> Optional[Path]:
-        if self.player is None:
-            return None
-        payload = serialize_savegame(self.player, self.world_season, self.world_tournament_no, self.world_total_tournaments, self.world_seed)
-        path = SAVE_DIR / "autosave_latest.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    def autosave_current_game(self, completed_season: Optional[int] = None) -> Optional[Path]:
+        payload = self._build_save_payload()
+        path = SAVE_DIR / "autosave_latest.json.gz"
+        write_save_payload(path, payload)
+        checkpoint_season = int(completed_season or 0)
+        if checkpoint_season > 0 and checkpoint_season % max(1, int(getattr(self, "autosave_interval_seasons", 5) or 5)) == 0:
+            checkpoint_name = f"autosave_season_{checkpoint_season}.json.gz"
+            write_save_payload(SAVE_DIR / checkpoint_name, payload)
         return path
 
 
     def save_character_json(self) -> None:
-        if not self.require_player():
+        if self.player is not None:
+            default_name = build_save_filename(self.player.name, random_suffix(self.rng))
+        else:
+            default_name = f"save_world_season_{self.world_season}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random_suffix(self.rng)}.json.gz"
+        file_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Save Game",
+            initialdir=str(SAVE_DIR),
+            initialfile=default_name,
+            defaultextension=".json.gz",
+            filetypes=[("Compressed save", "*.json.gz"), ("JSON save", "*.json")],
+        )
+        if not file_path:
             return
-        path = SAVE_DIR / build_save_filename(self.player.name, random_suffix(self.rng))
-        payload = serialize_savegame(self.player, self.world_season, self.world_tournament_no, self.world_total_tournaments, self.world_seed)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self.current_save_stem = Path(path).stem
+        path = Path(file_path)
+        payload = self._build_save_payload()
+        write_save_payload(path, payload)
+        self.current_save_stem = path.stem
         set_current_output_dir(self.current_save_stem)
         self.autosave_current_game()
         self.append_text(f"Saved game to {path}")
@@ -3352,22 +3856,27 @@ class StoryModeApp:
 
 
     def load_character_json(self) -> None:
-        initial = SAVE_DIR / "autosave_latest.json"
+        initial = SAVE_DIR / "autosave_latest.json.gz"
+        if not initial.exists():
+            initial = SAVE_DIR / "autosave_latest.json"
         file_path = filedialog.askopenfilename(
             parent=self.root,
             title="Load Save",
             initialdir=str(SAVE_DIR),
             initialfile=(initial.name if initial.exists() else ""),
-            filetypes=[("JSON save", "*.json")],
+            filetypes=[("Compressed save", "*.json.gz"), ("JSON save", "*.json")],
         )
         if not file_path:
             return
         try:
-            payload = json.loads(Path(file_path).read_text(encoding="utf-8"))
+            payload = read_save_payload(Path(file_path))
+            if isinstance(payload, dict) and "db_state" in payload:
+                self._import_db_state(payload.get("db_state") or {})
             player, world_season, world_tournament_no, world_total_tournaments, world_seed = deserialize_savegame(payload)
-            player.ensure_valid_loadout()
-            player.update_career_stage()
-            player.update_signature()
+            if player is not None:
+                player.ensure_valid_loadout()
+                player.update_career_stage()
+                player.update_signature()
             self.player = player
             self.current_save_stem = Path(file_path).stem
             set_current_output_dir(self.current_save_stem)
@@ -3386,62 +3895,135 @@ class StoryModeApp:
             self.season_ban_settings = self.db.get_world_json("season_ban_settings", dict(SEASON_BAN_DEFAULTS)) or dict(SEASON_BAN_DEFAULTS)
             self.current_season_bans = self.db.get_world_json("current_season_bans", empty_season_ban_state(self.world_season)) or empty_season_ban_state(self.world_season)
             self.season_ban_history = self.db.get_world_json("season_ban_history", []) or []
+            self.age_progression_enabled = bool(self.db.get_world_int("age_progression_enabled", 0))
+            self.season_new_npcs = int(self.db.get_world_int("season_new_npcs", SEASON_NEW_NPCS_DEFAULT) or SEASON_NEW_NPCS_DEFAULT)
+            self.autosave_interval_seasons = max(1, int(self.db.get_world_int("autosave_interval_seasons", 5) or 5))
             self.refresh_status()
-            self.append_text(f"Loaded save from {file_path}")
+            self.update_player_button_visibility()
+            if self.player is None:
+                self.append_text(f"Loaded world-only autosave from {file_path}")
+            else:
+                self.append_text(f"Loaded save from {file_path}")
             self.append_text(f"Tournament exports for this save go to {get_current_output_dir()}")
         except Exception as e:
             messagebox.showerror("Load failed", str(e), parent=self.root)
 
-    def build_tournament_field(self, participant_count: int) -> List[PlayerProfile]:
+
+    def build_tournament_field(self, participant_count: int, league_name: Optional[str] = None) -> List[PlayerProfile]:
         npcs = self.all_npcs()
         excluded = {self.player.name} if self.player else set()
 
+        target_league = league_name
         if self.player is not None:
             if (not profile_active_loadout_is_legal_exact(self.player)) or profile_uses_banned_active(self.player, self.current_season_bans):
-                raise ValueError(f"Player {self.player.name} does not have a legal active tournament loadout for this season. Change the loadout manually before entering.")
+                raise ValueError(
+                    f"Player {self.player.name} does not have a legal active tournament loadout for this season. "
+                    "Change the loadout manually before entering."
+                )
+            target_league = self.profile_league_band(self.player)
 
-        candidates: List[PlayerProfile] = []
-        for p in npcs:
-            if p.name in excluded:
-                continue
-            if enforce_minimum_tournament_eligibility(p, self.rng, self.templates, self.gates, self.abilities, season_bans=self.current_season_bans):
-                candidates.append(p)
+        def eligible_candidates_for_window(primary_league: Optional[str]) -> List[PlayerProfile]:
+            ordered_leagues = ["Amateur", "Semi-Pro", "Pro", "Elite"]
+            allowed = set(ordered_leagues)
+            if primary_league in ordered_leagues:
+                idx = ordered_leagues.index(primary_league)
+                allowed = {primary_league}
+                if idx > 0:
+                    allowed.add(ordered_leagues[idx - 1])
+                if idx < len(ordered_leagues) - 1:
+                    allowed.add(ordered_leagues[idx + 1])
+            pool: List[PlayerProfile] = []
+            for p in npcs:
+                if p.name in excluded or profile_is_retired(p):
+                    continue
+                if primary_league and self.profile_league_band(p) not in allowed:
+                    continue
+                if enforce_minimum_tournament_eligibility(
+                    p,
+                    self.rng,
+                    self.templates,
+                    self.gates,
+                    self.abilities,
+                    season_bans=self.current_season_bans,
+                ):
+                    pool.append(p)
+            return pool
 
-        if self.player and self.player.rivals:
-            rival_names = set(self.player.rivals)
-        else:
-            rival_names = set()
+        candidates = eligible_candidates_for_window(target_league)
+        rival_names = set(self.player.rivals) if self.player and self.player.rivals else set()
 
         def weight_fn(npc: PlayerProfile) -> float:
             weight = 1.0
-            weight += max(0.0, npc.glicko.rating - 1450) / 120.0
-            weight += npc.fame * 0.03
-            weight += npc.tournament_titles * 0.5
+            band_name = self.profile_league_band(npc)
+            if target_league:
+                target_mid = league_band_midpoint(target_league)
+                dist = abs(float(npc.glicko.rating) - target_mid)
+                weight += max(0.0, 1.8 - dist / 260.0)
+                if band_name == target_league:
+                    weight += 1.5
+                else:
+                    weight += 0.45
+            else:
+                weight += max(0.0, npc.glicko.rating - 1450) / 180.0
+            weight += npc.fame * 0.02
+            weight += npc.tournament_titles * 0.35
             if npc.name in rival_names:
                 weight += 2.5
             if self.player is not None and npc.chosen_attribute == self.player.chosen_attribute:
                 weight += 0.4
-            last_seen = npc.story_flags.get("last_seen_main_event", -999)
-            if self.world_tournament_no - last_seen <= 2:
-                weight += 0.6
-            return weight
+            current_total_event = max(1, int(self.world_total_tournaments or ((self.world_season - 1) * 10 + self.world_tournament_no)))
+            last_seen = int(npc.story_flags.get("last_seen_main_event_total", -9999))
+            missed = max(0, current_total_event - last_seen - 1)
+            weight += min(6.0, missed * 0.55)
+            if 1450 <= npc.glicko.rating <= 1650:
+                weight += 1.25
+            return max(0.1, weight)
 
-        if len(candidates) < participant_count - 1:
-            raise ValueError(f"Not enough eligible NPCs to build a {participant_count}-player field. Eligible NPCs: {len(candidates)}")
+        minimum_field = 4
+        player_slots = 1 if self.player is not None else 0
 
-        picked = weighted_sample_without_replacement(candidates, participant_count - 1, self.rng, weight_fn)
-        final_picked = []
+        if len(candidates) < minimum_field - player_slots:
+            raise ValueError(
+                f"Not enough eligible NPCs to build a tournament field for league {target_league or 'Open'}. "
+                f"Eligible NPCs: {len(candidates)}"
+            )
+
+        legal_sizes = [64, 32, 16, 8, 4]
+        max_total_size = len(candidates) + player_slots
+        participant_count = max(size for size in legal_sizes if size <= max_total_size)
+        needed_npcs = participant_count - player_slots
+
+        picked = weighted_sample_without_replacement(candidates, needed_npcs, self.rng, weight_fn)
+        if len(picked) < needed_npcs:
+            picked_names = {p.name for p in picked}
+            current_total_event = max(1, int(self.world_total_tournaments or ((self.world_season - 1) * 10 + self.world_tournament_no)))
+            backfill_pool = [p for p in candidates if p.name not in picked_names]
+            def backfill_key(p: PlayerProfile):
+                missed = current_total_event - int(p.story_flags.get("last_seen_main_event_total", -9999))
+                band_score = -abs(float(p.glicko.rating) - league_band_midpoint(target_league)) if target_league else float(p.glicko.rating)
+                return (missed, band_score, p.name.lower())
+            backfill_pool.sort(key=backfill_key, reverse=True)
+            picked.extend(backfill_pool[: max(0, needed_npcs - len(picked))])
+
+        final_picked: List[PlayerProfile] = []
+        current_total_event = max(1, int(self.world_total_tournaments or ((self.world_season - 1) * 10 + self.world_tournament_no)))
         for npc in picked:
             npc.story_flags["last_seen_main_event"] = self.world_tournament_no
-            if not enforce_minimum_tournament_eligibility(npc, self.rng, self.templates, self.gates, self.abilities, season_bans=self.current_season_bans):
-                continue
+            npc.story_flags["last_seen_main_event_total"] = current_total_event
             optimise_profile_loadout_with_bans(npc, self.current_season_bans)
             npc.ensure_valid_loadout()
             if profile_has_minimum_legal_loadout(npc) and not profile_uses_banned_active(npc, self.current_season_bans):
                 final_picked.append(npc)
-        if len(final_picked) < participant_count - 1:
-            raise ValueError(f"Not enough eligible NPCs to build a {participant_count}-player field after legal loadout enforcement. Eligible NPCs: {len(final_picked)}")
-        return [self.player] + final_picked[:participant_count - 1]
+
+        if len(final_picked) < minimum_field - player_slots:
+            raise ValueError(
+                f"Not enough eligible NPCs to build a legal tournament field for league {target_league or 'Open'}. "
+                f"Eligible NPCs: {len(final_picked)}"
+            )
+
+        participant_count = max(size for size in legal_sizes if size <= (len(final_picked) + player_slots))
+        needed_npcs = participant_count - player_slots
+        return ([self.player] if self.player is not None else []) + final_picked[:needed_npcs]
 
     def payout_for_finish(self, finish: int, participant_count: int, tournament_type: TournamentType) -> int:
         return tournament_payout_table(finish, participant_count, tournament_type)
@@ -3476,7 +4058,7 @@ class StoryModeApp:
             prof.story_flags["_last_used_event"] = self.world_tournament_no
 
         for name, finish in finish_map.items():
-            if name == self.player.name:
+            if self.player is not None and name == self.player.name:
                 payout = self.payout_for_finish(finish, participant_count, tournament_type)
                 apply_tournament_career_update(self.player, finish, participant_count, tournament_type, self.rng, payout)
                 continue
@@ -3496,65 +4078,256 @@ class StoryModeApp:
             npc.update_signature()
             all_map[npc.name] = npc
 
-        not_in_event = [p for p in all_map.values() if p.name not in finish_map]
-        simulate_offscreen_circuit(not_in_event, self.rng, self.templates, self.gates, self.abilities, self.world_tournament_no, meta=meta_snapshot, stock_context=shared_stock)
-        for npc in not_in_event:
-            if self.rng.random() < 0.55:
-                npc.training_points += 1
-                apply_training(npc, self.rng, 0.7)
-            if self.rng.random() < 0.35:
-                npc_market_progression(npc, self.rng, self.templates, self.gates, self.abilities, meta=meta_snapshot, stock_context=shared_stock, debug_cb=self.debug_append)
-            npc.update_career_stage()
-            npc.update_rivals()
-            npc.update_signature()
-
         self.save_npcs(list(all_map.values()))
         self.save_season_shop_stock(shared_stock)
 
+    def simulate_parallel_league_tournaments(self, excluded_names: Set[str]) -> List[Dict[str, object]]:
+        results: List[Dict[str, object]] = []
+        all_npcs = self.all_npcs()
+        leftovers: List[PlayerProfile] = []
+        for league_name in ["Amateur", "Semi-Pro", "Pro", "Elite"]:
+            pool = [
+                p for p in all_npcs
+                if p.name not in excluded_names
+                and not profile_is_retired(p)
+                and self.profile_league_band(p) == league_name
+            ]
+            legal_pool: List[PlayerProfile] = []
+            for npc in pool:
+                if enforce_minimum_tournament_eligibility(npc, self.rng, self.templates, self.gates, self.abilities, season_bans=self.current_season_bans):
+                    optimise_profile_loadout_with_bans(npc, self.current_season_bans)
+                    if profile_has_minimum_legal_loadout(npc) and not profile_uses_banned_active(npc, self.current_season_bans):
+                        legal_pool.append(npc)
+            remaining = legal_pool[:]
+            event_counter = 0
+            while len(remaining) >= 4:
+                event_counter += 1
+                if len(remaining) >= 32:
+                    participant_count = 32
+                elif len(remaining) >= 16:
+                    participant_count = 16
+                elif len(remaining) >= 8:
+                    participant_count = 8
+                else:
+                    participant_count = 4
+                entrants = weighted_sample_without_replacement(
+                    remaining,
+                    participant_count,
+                    self.rng,
+                    lambda p: 1.0 + max(0.0, p.glicko.rating - 1000.0) / 250.0 + p.tournament_titles * 0.15,
+                )
+                used_names = {p.name for p in entrants}
+                remaining = [p for p in remaining if p.name not in used_names]
+                tournament_type = self.rng.choice(list(TournamentType))
+                rounds = max(4, min(11, int(round(log2(participant_count)) + 2))) if tournament_type == TournamentType.SWISS else None
+                logger = Logger(enabled=False, prefix=f"parallel_{league_name.lower()}_{event_counter}")
+                finish_map: Dict[str, int] = {}
+                winner_name = ""
+                matchup_results: List[Tuple[str, str, bool]] = []
+                if tournament_type == TournamentType.SWISS:
+                    tournament = SwissTournament(entrants, rounds=rounds, seed=self.rng.randint(1, 10_000_000), verbose_matches=False, logger=logger, manual_handler=None, manual_player_name=None)
+                    tournament.run()
+                    matchup_results = [(rec.player1, rec.player2, rec.winner == rec.player1) for rec in tournament.records]
+                    standings_players = tournament.standings()
+                    for pos, p in enumerate(standings_players, start=1):
+                        finish_map[p.name] = pos
+                    winner_name = standings_players[0].name if standings_players else ""
+                else:
+                    knockout = KnockoutTournament(entrants, seed=self.rng.randint(1, 10_000_000), verbose_matches=False, logger=logger, manual_handler=None, manual_player_name=None)
+                    result = knockout.run()
+                    for round_records in result.rounds:
+                        for p1n, p2n, winner_n in round_records:
+                            matchup_results.append((p1n, p2n, winner_n == p1n))
+                    finish_map.update(result.placements)
+                    winner_name = result.champion.name if result.champion else ""
+                profile_map = {p.name: p for p in entrants}
+                apply_matchup_results(matchup_results, profile_map)
+                for prof in entrants:
+                    finish = finish_map.get(prof.name, participant_count)
+                    payout = tournament_payout_table(finish, participant_count, tournament_type)
+                    apply_tournament_career_update(prof, finish, participant_count, tournament_type, self.rng, payout)
+                    prof.training_points += 1
+                    apply_training(prof, self.rng, 1.2 if finish <= 4 else 0.8)
+                    prof.update_career_stage()
+                    prof.update_rivals()
+                    prof.update_signature()
+                standings = []
+                for prof in entrants:
+                    tourney = getattr(prof, "tourney", None)
+                    standings.append({
+                        "finish": int(finish_map.get(prof.name, participant_count)),
+                        "name": prof.name,
+                        "rating": float(prof.glicko.rating),
+                        "wins": int(getattr(tourney, "wins", 0)),
+                        "losses": int(getattr(tourney, "losses", 0)),
+                    })
+                standings.sort(key=lambda x: (x["finish"], -x["rating"], x["name"]))
+                results.append({
+                    "league": league_name,
+                    "tournament_no": event_counter,
+                    "winner": winner_name,
+                    "participant_count": participant_count,
+                    "tournament_type": tournament_type.value if hasattr(tournament_type, "value") else str(tournament_type),
+                    "top5": standings[:5],
+                })
+            leftovers.extend(remaining)
+        development_counter = 0
+        remaining = leftovers[:]
+        while len(remaining) >= 4:
+            development_counter += 1
+            if len(remaining) >= 16:
+                participant_count = 16
+            elif len(remaining) >= 8:
+                participant_count = 8
+            else:
+                participant_count = 4
+            entrants = weighted_sample_without_replacement(
+                remaining,
+                participant_count,
+                self.rng,
+                lambda p: 1.0 + max(0.0, p.glicko.rating - 900.0) / 300.0 + p.tournaments_entered * 0.05,
+            )
+            used_names = {p.name for p in entrants}
+            remaining = [p for p in remaining if p.name not in used_names]
+            tournament_type = TournamentType.SWISS if participant_count >= 8 else self.rng.choice(list(TournamentType))
+            rounds = max(4, min(11, int(round(log2(participant_count)) + 2))) if tournament_type == TournamentType.SWISS else None
+            logger = Logger(enabled=False, prefix=f"parallel_development_{development_counter}")
+            finish_map: Dict[str, int] = {}
+            winner_name = ""
+            matchup_results: List[Tuple[str, str, bool]] = []
+            if tournament_type == TournamentType.SWISS:
+                tournament = SwissTournament(entrants, rounds=rounds, seed=self.rng.randint(1, 10_000_000), verbose_matches=False, logger=logger, manual_handler=None, manual_player_name=None)
+                tournament.run()
+                matchup_results = [(rec.player1, rec.player2, rec.winner == rec.player1) for rec in tournament.records]
+                standings_players = tournament.standings()
+                for pos, p in enumerate(standings_players, start=1):
+                    finish_map[p.name] = pos
+                winner_name = standings_players[0].name if standings_players else ""
+            else:
+                knockout = KnockoutTournament(entrants, seed=self.rng.randint(1, 10_000_000), verbose_matches=False, logger=logger, manual_handler=None, manual_player_name=None)
+                result = knockout.run()
+                for round_records in result.rounds:
+                    for p1n, p2n, winner_n in round_records:
+                        matchup_results.append((p1n, p2n, winner_n == p1n))
+                finish_map.update(result.placements)
+                winner_name = result.champion.name if result.champion else ""
+            profile_map = {p.name: p for p in entrants}
+            apply_matchup_results(matchup_results, profile_map)
+            for prof in entrants:
+                finish = finish_map.get(prof.name, participant_count)
+                payout = tournament_payout_table(finish, participant_count, tournament_type)
+                apply_tournament_career_update(prof, finish, participant_count, tournament_type, self.rng, payout)
+                prof.training_points += 1
+                apply_training(prof, self.rng, 1.0 if finish <= 4 else 0.75)
+                prof.update_career_stage()
+                prof.update_rivals()
+                prof.update_signature()
+            standings = []
+            for prof in entrants:
+                tourney = getattr(prof, "tourney", None)
+                standings.append({
+                    "finish": int(finish_map.get(prof.name, participant_count)),
+                    "name": prof.name,
+                    "rating": float(prof.glicko.rating),
+                    "wins": int(getattr(tourney, "wins", 0)),
+                    "losses": int(getattr(tourney, "losses", 0)),
+                })
+            standings.sort(key=lambda x: (x["finish"], -x["rating"], x["name"]))
+            results.append({
+                "league": "Development",
+                "tournament_no": development_counter,
+                "winner": winner_name,
+                "participant_count": participant_count,
+                "tournament_type": tournament_type.value if hasattr(tournament_type, "value") else str(tournament_type),
+                "top5": standings[:5],
+            })
+        if results:
+            self.save_npcs(self.all_npcs())
+        return results
+
     def start_tournament(self, force_manual: Optional[bool] = None) -> None:
-        if not self.require_player():
-            return
-        if not profile_active_loadout_is_legal_exact(self.player):
-            messagebox.showerror("Illegal loadout", "Your active loadout is not legal. Change your loadout before entering this tournament.", parent=self.root)
-            return
-        if profile_uses_banned_active(self.player, self.current_season_bans):
-            messagebox.showerror("Banned loadout", "Your active loadout contains season-banned items. Change your loadout before entering this tournament.", parent=self.root)
-            return
+        if self.player is not None:
+            if not profile_active_loadout_is_legal_exact(self.player):
+                messagebox.showerror(
+                    "Illegal loadout",
+                    "Your active loadout is not legal. Change your loadout before entering this tournament.",
+                    parent=self.root,
+                )
+                return
+            if profile_uses_banned_active(self.player, self.current_season_bans):
+                messagebox.showerror(
+                    "Banned loadout",
+                    "Your active loadout contains season-banned items. Change your loadout before entering this tournament.",
+                    parent=self.root,
+                )
+                return
 
         current_season = self.world_season
         current_event = self.world_tournament_no
-
         participant_count = self.rng.choice([16, 16, 32, 32, 64])
         tournament_type = self.rng.choice(list(TournamentType))
-        if force_manual is None:
-            manual = messagebox.askyesno("Mode", "Play this tournament in manual mode?\n\nDuring manual prompts, type AUTO to simulate the rest of the tournament automatically.", parent=self.root)
+
+        def eligible_count_for_league(league_name: str) -> int:
+            total = 0
+            for p in self.all_npcs():
+                if profile_is_retired(p):
+                    continue
+                if self.profile_league_band(p) != league_name:
+                    continue
+                if enforce_minimum_tournament_eligibility(
+                    p,
+                    self.rng,
+                    self.templates,
+                    self.gates,
+                    self.abilities,
+                    season_bans=self.current_season_bans,
+                ):
+                    total += 1
+            return total
+
+        if self.player is not None:
+            featured_league = self.profile_league_band(self.player)
         else:
-            manual = bool(force_manual)
+            featured_league = None
+            for name in ["Elite", "Pro", "Semi-Pro", "Amateur"]:
+                if eligible_count_for_league(name) >= 4:
+                    featured_league = name
+                    break
+            if featured_league is None:
+                messagebox.showerror(
+                    "No tournament available",
+                    "There are not enough eligible NPCs in any league to run a main tournament right now.",
+                    parent=self.root,
+                )
+                return
+
+        if force_manual is None and self.player is not None:
+            manual = messagebox.askyesno(
+                "Mode",
+                "Play this tournament in manual mode?\n\nDuring manual prompts, type AUTO to simulate the rest of the tournament automatically.",
+                parent=self.root,
+            )
+        else:
+            manual = bool(force_manual) if self.player is not None else False
 
         debug = bool(self.debug_var.get())
         handler = TkManualChoiceHandler(self.root) if manual else None
-
-        entrants = self.build_tournament_field(participant_count)
+        entrants = self.build_tournament_field(participant_count, league_name=featured_league)
+        participant_count = len(entrants)
         rounds = max(4, min(11, int(round(log2(participant_count)) + 2))) if tournament_type == TournamentType.SWISS else None
 
         self.append_text(
-            f"Starting {tournament_type.value} tournament with {participant_count} participants in season {current_season}, event {current_event}"
+            f"Starting {featured_league} league {tournament_type.value} tournament with "
+            f"{participant_count} participants in season {current_season}, event {current_event}"
         )
+        self.append_text(f"Starting {featured_league} league {tournament_type.value} tournament with {participant_count} participants in season {current_season}, event {current_event}")
         logger = Logger(enabled=debug, prefix="story")
 
         finish_map: Dict[str, int] = {}
         winner_name = ""
         matchup_results: List[Tuple[str, str, bool]] = []
         if tournament_type == TournamentType.SWISS:
-            tournament = SwissTournament(
-                entrants,
-                rounds=rounds,
-                seed=self.rng.randint(1, 10_000_000),
-                verbose_matches=debug,
-                logger=logger,
-                manual_handler=handler,
-                manual_player_name=self.player.name if manual else None,
-            )
+            tournament = SwissTournament(entrants, rounds=rounds, seed=self.rng.randint(1, 10_000_000), verbose_matches=debug, logger=logger, manual_handler=handler, manual_player_name=self.player.name if manual and self.player is not None else None)
             tournament.run()
             matchup_results = [(rec.player1, rec.player2, rec.winner == rec.player1) for rec in tournament.records]
             summary_path, play_path = tournament.export_files(seed=self.rng.randint(1, 10_000_000), save_play_by_play=True)
@@ -3562,42 +4335,39 @@ class StoryModeApp:
             for pos, p in enumerate(standings, start=1):
                 finish_map[p.name] = pos
             winner_name = standings[0].name if standings else ""
-            finish = finish_map.get(self.player.name, participant_count)
-            payout = self.payout_for_finish(finish, participant_count, tournament_type)
-            self.append_text(f"Finished {finish} in Swiss. Earned £{payout}.")
-            self.append_text(f"Saved summary to {summary_path}")
-            if play_path:
-                self.append_text(f"Saved play by play to {play_path}")
-
+            if self.player is not None:
+                finish = finish_map.get(self.player.name, participant_count)
+                payout = self.payout_for_finish(finish, participant_count, tournament_type)
+                self.append_text(f"Finished {finish} in Swiss. Earned £{payout}.")
+            if is_text_file_exports_enabled():
+                self.append_text(f"Saved summary to {summary_path}")
+                if play_path:
+                    self.append_text(f"Saved play by play to {play_path}")
         else:
-            knockout = KnockoutTournament(
-                entrants,
-                seed=self.rng.randint(1, 10_000_000),
-                verbose_matches=debug,
-                logger=logger,
-                manual_handler=handler,
-                manual_player_name=self.player.name if manual else None,
-            )
+            knockout = KnockoutTournament(entrants, seed=self.rng.randint(1, 10_000_000), verbose_matches=debug, logger=logger, manual_handler=handler, manual_player_name=self.player.name if manual and self.player is not None else None)
             result = knockout.run()
-            matchup_results = []
             for round_records in result.rounds:
                 for p1n, p2n, winner_n in round_records:
                     matchup_results.append((p1n, p2n, winner_n == p1n))
             summary_path, play_path = knockout.export_files(seed=self.rng.randint(1, 10_000_000), save_play_by_play=True)
             finish_map.update(result.placements)
             winner_name = result.champion.name if result.champion else ""
-            finish = result.placements.get(self.player.name, participant_count)
-            payout = self.payout_for_finish(finish, participant_count, tournament_type)
-            self.append_text(f"Finished {finish} in Knockout. Earned £{payout}.")
-            self.append_text(f"Saved summary to {summary_path}")
-            if play_path:
-                self.append_text(f"Saved play by play to {play_path}")
+            if self.player is not None:
+                finish = result.placements.get(self.player.name, participant_count)
+                payout = self.payout_for_finish(finish, participant_count, tournament_type)
+                self.append_text(f"Finished {finish} in Knockout. Earned £{payout}.")
+            if is_text_file_exports_enabled():
+                self.append_text(f"Saved summary to {summary_path}")
+                if play_path:
+                    self.append_text(f"Saved play by play to {play_path}")
 
         profile_map = {p.name: p for p in entrants}
         if self.player is not None:
             profile_map[self.player.name] = self.player
         apply_matchup_results(matchup_results, profile_map)
         archive = make_tournament_archive(current_season, current_event, tournament_type, participant_count, entrants, finish_map, winner_name, summary_path, play_path)
+        archive["league"] = featured_league
+        archive["parallel_leagues"] = self.simulate_parallel_league_tournaments({p.name for p in entrants})
         self.db.save_tournament_archive(archive)
         self.apply_post_tournament_progression(entrants, finish_map, tournament_type, participant_count)
 
@@ -3618,28 +4388,23 @@ class StoryModeApp:
                 self.append_text(f"Season {self.world_season} ban list generated from Season {previous_season} usage. Bakugan: {', '.join(bans.get('bakugan', [])) or 'None'} | Gate: {', '.join(bans.get('gates', [])) or 'None'} | Ability: {', '.join(bans.get('abilities', [])) or 'None'}")
             self.process_new_season_age_progression(self.world_season)
             self.maybe_run_world_cup(previous_season)
+            self.autosave_current_game(completed_season=previous_season)
 
-        self.append_text(f"Archived tournament history for Season {current_season} Event {current_event}. Offscreen circuits simulated for non-participating NPCs.")
-        player_finish = finish_map.get(self.player.name, participant_count)
-        latest = self.player.tournament_history[-1] if self.player.tournament_history else {}
-        self.append_text(
-            f"Career updated: finish {player_finish}, money £{self.player.money}, rating {self.player.glicko.rating:.0f}, peak {self.player.peak_rating:.0f}, "
-            f"titles {self.player.tournament_titles}, podiums {self.player.podiums}, top8s {self.player.top8s}, stage {self.display_title(self.player)}"
-        )
+        self.append_text(f"Archived tournament history for Season {current_season} Event {current_event}. Simulated parallel league tournaments for the rest of the playerbase.")
+        if self.player is not None:
+            player_finish = finish_map.get(self.player.name, participant_count)
+            self.append_text(f"Career updated: finish {player_finish}, money £{self.player.money}, rating {self.player.glicko.rating:.0f}, peak {self.player.peak_rating:.0f}, titles {self.player.tournament_titles}, podiums {self.player.podiums}, top8s {self.player.top8s}, stage {self.display_title(self.player)}")
         self.autosave_current_game()
         self.refresh_status()
 
         if debug:
-            debug_name = build_output_filename(
-                "story_debug",
-                participant_count,
-                rounds if rounds is not None else None,
-                random_suffix(self.rng),
-            )
+            debug_name = build_output_filename("story_debug", participant_count, rounds if rounds is not None else None, random_suffix(self.rng))
             path = logger.save(debug_name)
-            self.append_text(f"Saved debug log to {path}")
+            if path is not None:
+                self.append_text(f"Saved debug log to {path}")
 
-
+# ============================================================
+# STANDALONE RUNNERS
 # ============================================================
 # STANDALONE RUNNERS
 # ============================================================
@@ -3676,6 +4441,8 @@ def run_single_match(player1: PlayerProfile, player2: PlayerProfile, seed: int =
         text_lines.extend(player_loadout_lines(player1))
         text_lines.append("")
         text_lines.extend(player_loadout_lines(player2))
-        output_path.write_text("\n".join(text_lines), encoding="utf-8")
-        print(f"Saved log to: {output_path}")
+        written_path = maybe_write_text(output_path, "\n".join(text_lines), encoding="utf-8")
+        if written_path is not None:
+            output_path = written_path
+            print(f"Saved log to: {output_path}")
     return winner, perf, match, output_path

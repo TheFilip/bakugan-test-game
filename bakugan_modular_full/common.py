@@ -24,6 +24,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from .content import RAW_BAKUGAN_TEMPLATES, RAW_ABILITY_CARDS, RAW_GATE_CARDS
 import re
+import builtins
+import gzip
 
 
 # ============================================================
@@ -46,6 +48,23 @@ SAVE_OUTPUTS_DIR = APP_DIR / "save_outputs"
 SAVE_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_OUTPUT_DIR = SAVE_OUTPUTS_DIR / "session_unsaved"
 CURRENT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+TEXT_OUTPUT_TO_IDE_ENABLED = True
+TEXT_FILE_EXPORTS_ENABLED = True
+DEBUG_CONSOLE_TEXT_ENABLED = True
+_ORIGINAL_PRINT = builtins.print
+
+def set_debug_console_text_enabled(enabled: bool) -> None:
+    global DEBUG_CONSOLE_TEXT_ENABLED
+    DEBUG_CONSOLE_TEXT_ENABLED = bool(enabled)
+
+def is_debug_console_text_enabled() -> bool:
+    return bool(DEBUG_CONSOLE_TEXT_ENABLED)
+
+def debug_console_print(*args, **kwargs) -> None:
+    if DEBUG_CONSOLE_TEXT_ENABLED:
+        _ORIGINAL_PRINT(*args, **kwargs)
+
+builtins.print = debug_console_print
 DB_PATH = APP_DIR / "bakugan_story.db"
 WORLD_CUP_INTERVAL_DEFAULT = 10
 WORLD_CUP_NEW_NPCS_DEFAULT = 2
@@ -67,6 +86,36 @@ SEASON_BAN_DEFAULTS = {
     "gate_count": 1,
     "ability_count": 1,
 }
+
+LEAGUE_BANDS: List[Tuple[str, int, Optional[int]]] = [
+    ("Amateur", 800, 1200),
+    ("Semi-Pro", 1200, 1600),
+    ("Pro", 1600, 2000),
+    ("Elite", 2000, None),
+]
+
+def all_league_names() -> List[str]:
+    return [name for name, _lo, _hi in LEAGUE_BANDS]
+
+def league_band_for_rating(rating: float) -> str:
+    value = float(rating or 0.0)
+    for name, lo, hi in LEAGUE_BANDS:
+        if value >= lo and (hi is None or value < hi):
+            return name
+    return LEAGUE_BANDS[0][0]
+
+def league_band_bounds(name: str) -> Tuple[int, Optional[int]]:
+    for band_name, lo, hi in LEAGUE_BANDS:
+        if band_name == name:
+            return lo, hi
+    return LEAGUE_BANDS[0][1], LEAGUE_BANDS[0][2]
+
+def league_band_midpoint(name: str) -> float:
+    lo, hi = league_band_bounds(name)
+    if hi is None:
+        return float(lo + 200)
+    return (float(lo) + float(hi)) / 2.0
+
 
 CHANGELOG_VERSION = "v1.2.0"
 CHANGELOG_DATE = "2026-03-23"
@@ -527,40 +576,30 @@ def profile_is_retired(profile: PlayerProfile) -> bool:
 def _skewed_stat(rng: random.Random, lo: float, hi: float, a: float = 1.35, b: float = 3.4) -> float:
     return round(lo + (hi - lo) * rng.betavariate(a, b), 2)
 
-def ensure_age_metadata(profile: PlayerProfile, rng: random.Random, starting_age: Optional[int] = None) -> None:
-    if not isinstance(profile.story_flags, dict):
-        profile.story_flags = {}
-    flags = profile.story_flags
-    if starting_age is None:
-        starting_age = int(flags.get("age", PLAYER_DEFAULT_AGE) or PLAYER_DEFAULT_AGE)
-    age = max(PLAYER_MIN_AGE, int(starting_age))
-    seeded = bool(flags.get("_age_seeded", 0))
-    flags.setdefault("age", age)
-    flags.setdefault("peak_age", max(age + rng.randint(3, 10), rng.randint(18, 28)))
-    flags.setdefault("retirement_age", max(int(flags["peak_age"]) + rng.randint(3, 10), int(flags["peak_age"]) + 1))
-    for key in ("growth_roll","growth_int","growth_agg","growth_risk"):
-        flags.setdefault(key, round(rng.uniform(0.005, 0.025), 4))
-    for key in ("decline_roll","decline_int","decline_agg","decline_risk"):
-        flags.setdefault(key, round(rng.uniform(0.003, 0.018), 4))
-    flags.setdefault("retired", 0)
-    if not seeded:
-        years = max(0, age - PLAYER_MIN_AGE)
-        for _ in range(years):
-            if age <= int(flags["peak_age"]):
-                profile.rolling_skill = min(0.99, round(profile.rolling_skill + float(flags["growth_roll"]), 2))
-                profile.intelligence = min(0.99, round(profile.intelligence + float(flags["growth_int"]), 2))
-                profile.aggression = min(0.99, round(profile.aggression + float(flags["growth_agg"]), 2))
-                profile.risk = min(0.99, round(profile.risk + float(flags["growth_risk"]), 2))
-        flags["_age_seeded"] = 1
+def _safe_randint(rng: random.Random, a: int, b: int) -> int:
+    a = int(a)
+    b = int(b)
+    if a > b:
+        return a
+    return rng.randint(a, b)
 
-def age_profile_one_season(profile: PlayerProfile, rng: random.Random) -> bool:
-    ensure_age_metadata(profile, rng, profile_age(profile))
-    flags = profile.story_flags
-    new_age = profile_age(profile) + 1
-    flags["age"] = new_age
-    peak_age = int(flags.get("peak_age", new_age))
-    retirement_age = int(flags.get("retirement_age", peak_age + 5))
-    if new_age <= peak_age:
+def _sample_career_arc(starting_age: int, rng: random.Random) -> Dict[str, int]:
+    age = max(PLAYER_MIN_AGE, int(starting_age))
+    roll = rng.random()
+    if roll < 0.12:
+        peak_age = _safe_randint(rng, max(age + 1, 16), max(age + 1, 20))
+        retirement_age = _safe_randint(rng, max(peak_age, age + 1), max(peak_age + 7, 25))
+    elif roll < 0.30:
+        peak_age = _safe_randint(rng, max(age + 1, 18), max(age + 1, 24))
+        retirement_age = _safe_randint(rng, max(peak_age, age + 1), max(peak_age + 10, 28))
+    else:
+        peak_age = _safe_randint(rng, max(age + 2, 20), max(age + 2, 31))
+        retirement_age = _safe_randint(rng, max(peak_age + 1, age + 1), max(peak_age + 16, 32))
+    return {"peak_age": int(peak_age), "retirement_age": int(retirement_age)}
+
+def _apply_profile_age_delta(profile: PlayerProfile, flags: Dict, current_age: int) -> None:
+    peak_age = int(flags.get("peak_age", current_age))
+    if current_age <= peak_age:
         profile.rolling_skill = min(0.99, round(profile.rolling_skill + float(flags.get("growth_roll", 0.01)), 2))
         profile.intelligence = min(0.99, round(profile.intelligence + float(flags.get("growth_int", 0.01)), 2))
         profile.aggression = min(0.99, round(profile.aggression + float(flags.get("growth_agg", 0.01)), 2))
@@ -570,6 +609,43 @@ def age_profile_one_season(profile: PlayerProfile, rng: random.Random) -> bool:
         profile.intelligence = max(0.05, round(profile.intelligence - float(flags.get("decline_int", 0.01)), 2))
         profile.aggression = max(0.05, round(profile.aggression - float(flags.get("decline_agg", 0.01)), 2))
         profile.risk = max(0.05, round(profile.risk - float(flags.get("decline_risk", 0.01)), 2))
+
+
+def ensure_age_metadata(profile: PlayerProfile, rng: random.Random, starting_age: Optional[int] = None) -> None:
+    if not isinstance(profile.story_flags, dict):
+        profile.story_flags = {}
+    flags = profile.story_flags
+    if starting_age is None:
+        starting_age = int(flags.get("age", PLAYER_DEFAULT_AGE) or PLAYER_DEFAULT_AGE)
+    age = max(PLAYER_MIN_AGE, int(starting_age))
+    seeded = bool(flags.get("_age_seeded", 0))
+    flags.setdefault("age", age)
+    arc = _sample_career_arc(age, rng)
+    flags.setdefault("peak_age", int(arc["peak_age"]))
+    flags.setdefault("retirement_age", int(arc["retirement_age"]))
+    flags["peak_age"] = max(age + 1, int(flags.get("peak_age", age + 1)))
+    flags["retirement_age"] = max(age + 1, int(flags.get("retirement_age", age + 1)))
+    for key in ("growth_roll","growth_int","growth_agg","growth_risk"):
+        flags.setdefault(key, round(rng.uniform(0.005, 0.025), 4))
+    for key in ("decline_roll","decline_int","decline_agg","decline_risk"):
+        flags.setdefault(key, round(rng.uniform(0.003, 0.018), 4))
+    flags.setdefault("retired", 0)
+    if not seeded:
+        current_age = PLAYER_MIN_AGE
+        while current_age < age:
+            current_age += 1
+            _apply_profile_age_delta(profile, flags, current_age)
+        flags["_age_seeded"] = 1
+        flags["age"] = age
+
+
+def age_profile_one_season(profile: PlayerProfile, rng: random.Random) -> bool:
+    ensure_age_metadata(profile, rng, profile_age(profile))
+    flags = profile.story_flags
+    new_age = profile_age(profile) + 1
+    flags["age"] = new_age
+    _apply_profile_age_delta(profile, flags, new_age)
+    retirement_age = int(flags.get("retirement_age", int(flags.get("peak_age", new_age)) + 10))
     if not profile.is_human and new_age >= retirement_age:
         flags["retired"] = 1
         return True
@@ -602,6 +678,31 @@ def get_current_output_dir() -> Path:
     return CURRENT_OUTPUT_DIR
 
 
+def set_text_output_to_ide_enabled(enabled: bool) -> None:
+    global TEXT_OUTPUT_TO_IDE_ENABLED
+    TEXT_OUTPUT_TO_IDE_ENABLED = bool(enabled)
+
+
+def is_text_output_to_ide_enabled() -> bool:
+    return bool(TEXT_OUTPUT_TO_IDE_ENABLED)
+
+
+def set_text_file_exports_enabled(enabled: bool) -> None:
+    global TEXT_FILE_EXPORTS_ENABLED
+    TEXT_FILE_EXPORTS_ENABLED = bool(enabled)
+
+
+def is_text_file_exports_enabled() -> bool:
+    return bool(TEXT_FILE_EXPORTS_ENABLED)
+
+
+def maybe_write_text(path: Path, text: str, encoding: str = "utf-8") -> Optional[Path]:
+    if not is_text_file_exports_enabled():
+        return None
+    path.write_text(text, encoding=encoding)
+    return path
+
+
 def random_suffix(rng: Optional[random.Random] = None, length: int = 6) -> str:
     rng = rng or random.Random()
     chars = string.ascii_lowercase + string.digits
@@ -625,7 +726,26 @@ def build_save_filename(player_name: str, suffix: Optional[str] = None) -> str:
     suffix = suffix or random_suffix()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = "".join(ch for ch in player_name if ch.isalnum() or ch in ("_", "-", " ")).strip().replace(" ", "_")
-    return f"save_{safe_name}_{timestamp}_{suffix}.json"
+    return f"save_{safe_name}_{timestamp}_{suffix}.json.gz"
+
+
+def write_save_payload(path: Path, payload: Dict) -> Path:
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    if path.suffix.lower() == ".gz":
+        with gzip.open(path, "wb", compresslevel=9) as fh:
+            fh.write(raw)
+    else:
+        path.write_bytes(raw)
+    return path
+
+
+def read_save_payload(path: Path) -> Dict:
+    if path.suffix.lower() == ".gz":
+        with gzip.open(path, "rb") as fh:
+            data = fh.read()
+    else:
+        data = path.read_bytes()
+    return json.loads(data.decode("utf-8"))
 
 
 def serialize_savegame(player: "PlayerProfile", world_season: int, world_tournament_no: int, world_total_tournaments: int = 0, world_seed: int = 0) -> Dict:
@@ -640,12 +760,30 @@ def serialize_savegame(player: "PlayerProfile", world_season: int, world_tournam
     }
 
 
-def deserialize_savegame(payload: Dict) -> Tuple["PlayerProfile", int, int, int, int]:
-    player = deserialize_profile(payload["player"])
+def serialize_world_savegame(world_season: int, world_tournament_no: int, world_total_tournaments: int = 0, world_seed: int = 0) -> Dict:
+    return {
+        "save_version": 3,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "world_season": world_season,
+        "world_tournament_no": world_tournament_no,
+        "world_total_tournaments": int(world_total_tournaments),
+        "world_seed": int(world_seed),
+        "player": None,
+    }
+
+
+def deserialize_world_state(payload: Dict) -> Tuple[int, int, int, int]:
     world_season = int(payload.get("world_season", 1))
     world_tournament_no = int(payload.get("world_tournament_no", 0))
     world_total_tournaments = int(payload.get("world_total_tournaments", max(0, (world_season - 1) * 10 + world_tournament_no)))
     world_seed = int(payload.get("world_seed", 0))
+    return world_season, world_tournament_no, world_total_tournaments, world_seed
+
+
+def deserialize_savegame(payload: Dict) -> Tuple[Optional["PlayerProfile"], int, int, int, int]:
+    player_payload = payload.get("player")
+    player = deserialize_profile(player_payload) if player_payload else None
+    world_season, world_tournament_no, world_total_tournaments, world_seed = deserialize_world_state(payload)
     return player, world_season, world_tournament_no, world_total_tournaments, world_seed
 
 
@@ -1230,14 +1368,40 @@ class PlayerProfile:
 
     def update_career_stage(self) -> None:
         rating = self.glicko.rating
-        if self.tournament_titles >= 5 or rating >= 1800:
+        titles = self.tournament_titles
+        finals = self.finals
+        entered = self.tournaments_entered
+        wins = self.wins
+        podiums = self.podiums
+
+        if titles >= 18 and podiums >= 40 and rating >= 2225:
+            self.career_stage = "Grand Brawler"
+        elif titles >= 10 and finals >= 20 and podiums >= 28 and rating >= 2100:
+            self.career_stage = "Master Brawler"
+        elif titles >= 6 and finals >= 12 and podiums >= 18 and rating >= 1980:
+            self.career_stage = "International Brawler"
+        elif titles >= 4 and finals >= 8 and podiums >= 12 and rating >= 1880:
+            self.career_stage = "National Brawler"
+        elif titles >= 2 and finals >= 5 and podiums >= 8 and rating >= 1790:
+            self.career_stage = "Senior Champion"
+        elif titles >= 1 and finals >= 3 and podiums >= 5 and rating >= 1710:
             self.career_stage = "Champion"
-        elif self.tournament_titles >= 2 or rating >= 1680:
-            self.career_stage = "Star"
-        elif self.finals >= 3 or rating >= 1600:
+        elif finals >= 2 and podiums >= 4 and wins >= 150 and rating >= 1630:
+            self.career_stage = "Expert"
+        elif podiums >= 2 and wins >= 95 and rating >= 1560:
+            self.career_stage = "Candidate Expert"
+        elif entered >= 40 and wins >= 70 and rating >= 1500:
+            self.career_stage = "Senior Contender"
+        elif entered >= 24 and wins >= 35 and rating >= 1440:
             self.career_stage = "Contender"
-        elif self.tournaments_entered >= 8 or rating >= 1530:
-            self.career_stage = "Veteran"
+        elif entered >= 12 and rating >= 1385:
+            self.career_stage = "Class A Brawler"
+        elif entered >= 6 or rating >= 1335:
+            self.career_stage = "Class B Brawler"
+        elif entered >= 3 or rating >= 1285:
+            self.career_stage = "Class C Brawler"
+        elif entered >= 1 or rating >= 1235:
+            self.career_stage = "Class D Brawler"
         else:
             self.career_stage = "Rookie"
 
@@ -1329,10 +1493,9 @@ class Logger:
         if self.enabled:
             print(text)
 
-    def save(self, filename: str) -> Path:
+    def save(self, filename: str) -> Optional[Path]:
         path = DEBUG_DIR / filename
-        path.write_text("\n".join(self.lines), encoding="utf-8")
-        return path
+        return maybe_write_text(path, "\n".join(self.lines), encoding="utf-8")
 
 
 # ============================================================
@@ -1587,6 +1750,62 @@ def validate_ability_selection(indices: List[int], collection: List[AbilityCard]
 
 
 
+
+
+def score_active_loadout(profile: PlayerProfile, meta: Optional[Dict[str, object]] = None) -> Dict[str, int]:
+    profile.ensure_valid_loadout()
+    active_bakus = profile.active_bakugan()
+    active_gates = profile.active_gates()
+    active_abilities = profile.active_abilities()
+    if len(active_bakus) < 3 or len(active_gates) < 3 or len(active_abilities) < 3:
+        return {"rating": 0, "synergy": 0, "power": 0, "flexibility": 0}
+
+    meta = meta or {}
+    baku_vals = [max(0.0, bakugan_profile_value(profile, b, active_gates=active_gates, meta=meta)) for b in active_bakus]
+    gate_vals = [
+        max(0.0, gate_profile_value(profile, g, active_bakus=active_bakus, meta=meta) + gate_profile_archetype_bonus(profile, g, active_bakus, meta=meta))
+        for g in active_gates
+    ]
+    ability_vals = []
+    for ability in active_abilities:
+        ctx = ability_context_scores(profile, ability, active_bakus, active_gates, meta)
+        val = ability_profile_value(profile, ability, active_bakus=active_bakus, active_gates=active_gates, meta=meta)
+        val += ability_profile_archetype_bonus(profile, ability, active_bakus, active_gates=active_gates, meta=meta)
+        val += 0.25 * sum(ctx.values())
+        ability_vals.append(max(0.0, val))
+
+    avg_baku = sum(baku_vals) / max(1, len(baku_vals))
+    avg_gate = sum(gate_vals) / max(1, len(gate_vals))
+    avg_ability = sum(ability_vals) / max(1, len(ability_vals))
+    power = int(round(clamp(avg_baku * 0.32 + avg_gate * 0.20 + avg_ability * 0.22, 0.0, 50.0)))
+
+    gate_bonus_fit = 0.0
+    for baku in active_bakus:
+        gate_bonus_fit += max((max(0, gate.bonuses.get(baku.attribute, 0)) for gate in active_gates), default=0)
+    gate_bonus_fit = gate_bonus_fit / max(1, len(active_bakus) * 120)
+    live_rate = sum(ability_live_rate(profile, ability, active_bakus, active_gates) for ability in active_abilities) / max(1, len(active_abilities))
+    gate_synergy = sum(ability_gate_synergy_score(profile, ability, active_bakus, active_gates, meta) for ability in active_abilities) / max(1, len(active_abilities))
+    archetype_bias = sum(ability_profile_archetype_bonus(profile, ability, active_bakus, active_gates=active_gates, meta=meta) for ability in active_abilities) / max(1, len(active_abilities))
+    synergy = int(round(clamp(gate_bonus_fit * 12.0 + live_rate * 9.0 + gate_synergy * 0.18 + archetype_bias * 0.10, 0.0, 30.0)))
+
+    unique_attributes = len({b.attribute for b in active_bakus})
+    unique_names = len({normalize_named_bakugan_token(b.name) for b in active_bakus})
+    unique_gate_types = len({g.gate_type for g in active_gates})
+    ability_tags_seen: Set[str] = set()
+    for ability in active_abilities:
+        ability_tags_seen |= ability_tags(ability)
+    flexibility = 0.0
+    flexibility += (unique_attributes / 3.0) * 8.0
+    flexibility += (unique_names / 3.0) * 3.0
+    flexibility += (unique_gate_types / 3.0) * 3.0
+    flexibility += clamp(len(ability_tags_seen), 0, 12) / 12.0 * 6.0
+    flexibility = int(round(clamp(flexibility, 0.0, 20.0)))
+
+    rating = int(clamp(power + synergy + flexibility, 0.0, 100.0))
+    return {"rating": rating, "synergy": synergy, "power": power, "flexibility": flexibility}
+
+
+
 def player_loadout_lines(player: PlayerProfile, prefix: str = "") -> List[str]:
     player.ensure_valid_loadout()
     player.update_career_stage()
@@ -1607,6 +1826,11 @@ def player_loadout_lines(player: PlayerProfile, prefix: str = "") -> List[str]:
     )
     if player.rivals:
         lines.append(f"{prefix}Rivals: {', '.join(player.rivals[-5:])}")
+    breakdown = score_active_loadout(player)
+    lines.append(f"{prefix}Loadout rating: {breakdown['rating']}/100")
+    lines.append(f"{prefix}  Synergy: {breakdown['synergy']}/30")
+    lines.append(f"{prefix}  Power: {breakdown['power']}/50")
+    lines.append(f"{prefix}  Flexibility: {breakdown['flexibility']}/20")
 
     lines.append(f"{prefix}Bakugan:")
     for idx, b in enumerate(player.collection_bakugan):
@@ -1629,6 +1853,9 @@ class ManualChoiceHandler:
     def choose_gate_to_set(self, player: PlayerProfile, remaining_gate_indices: List[int]) -> int:
         raise NotImplementedError
 
+    def choose_gate_to_set_before_roll(self, player: PlayerProfile, remaining_gate_indices: List[int], field_descriptions: List[str]) -> Optional[int]:
+        raise NotImplementedError
+
     def choose_bakugan_to_roll(self, player: PlayerProfile, remaining_bakugan_indices: List[int]) -> int:
         raise NotImplementedError
 
@@ -1649,54 +1876,274 @@ class TkManualChoiceHandler(ManualChoiceHandler):
     def __init__(self, root: tk.Tk):
         self.root = root
         self.auto_rest = False
+        self.auto_match = False
+        self.match_state_provider: Optional[Callable[[Optional[str]], str]] = None
+        self.tournament_state_provider: Optional[Callable[[Optional[str]], str]] = None
 
-    def _ask_choice(self, title: str, prompt: str, options: List[str], allow_skip: bool = False) -> Optional[int]:
-        msg = prompt + "\n\n" + "\n".join(f"{i}: {o}" for i, o in enumerate(options))
+    def begin_match(self, match_state_provider: Optional[Callable[[Optional[str]], str]] = None) -> None:
+        self.auto_match = False
+        self.match_state_provider = match_state_provider
+
+    def end_match(self) -> None:
+        self.auto_match = False
+        self.match_state_provider = None
+
+    def set_tournament_state_provider(self, provider: Optional[Callable[[Optional[str]], str]]) -> None:
+        self.tournament_state_provider = provider
+
+    def _match_state_text(self, viewer_name: Optional[str]) -> str:
+        if self.match_state_provider is None:
+            return "No live match state available."
+        try:
+            return self.match_state_provider(viewer_name)
+        except Exception as exc:
+            return f"Unable to build live match state: {exc}"
+
+    def _tournament_state_text(self, viewer_name: Optional[str]) -> str:
+        if self.tournament_state_provider is None:
+            return "No live tournament state available."
+        try:
+            return self.tournament_state_provider(viewer_name)
+        except Exception as exc:
+            return f"Unable to build tournament state: {exc}"
+
+    def _prompt_auto_mode(self) -> Optional[str]:
+        decision = messagebox.askyesnocancel(
+            "Auto Mode",
+            "Switch to auto mode?\n\nYes = rest of tournament\nNo = rest of current match\nCancel = keep manual control",
+            parent=self.root,
+        )
+        if decision is None:
+            return None
+        if decision:
+            self.auto_rest = True
+            self.auto_match = True
+            return "tournament"
+        self.auto_match = True
+        return "match"
+
+    def _handle_special_entry(self, raw_text: str, allow_skip: bool) -> Tuple[bool, Optional[int]]:
+        ans = raw_text.strip()
+        upper = ans.upper()
+        if allow_skip and ans == "":
+            return True, None
+        if upper in {"AUTO", "AUTO MATCH", "AUTO TOURNAMENT", "A"}:
+            if upper == "AUTO TOURNAMENT":
+                self.auto_rest = True
+                self.auto_match = True
+                return True, None
+            if upper == "AUTO MATCH":
+                self.auto_match = True
+                return True, None
+            self._prompt_auto_mode()
+            return True, None
+        if ans.isdigit():
+            return False, int(ans)
+        return False, -1
+
+    def _show_text_popup(self, title: str, text: str) -> None:
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("900x650")
+        frame = ttk.Frame(win, padding=10)
+        frame.pack(fill="both", expand=True)
+        box = tk.Text(frame, wrap="word")
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=box.yview)
+        box.configure(yscrollcommand=ybar.set)
+        box.insert("1.0", text)
+        box.configure(state="disabled")
+        box.pack(side="left", fill="both", expand=True)
+        ybar.pack(side="right", fill="y")
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 10))
+        win.wait_window()
+
+    def _ask_choice(self, title: str, prompt: str, options: List[str], allow_skip: bool = False, viewer_name: Optional[str] = None) -> Optional[int]:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("1180x760")
+        dialog.minsize(980, 620)
+
+        result: Dict[str, Optional[int]] = {"value": None}
+
+        container = ttk.Frame(dialog, padding=10)
+        container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=1)
+        container.rowconfigure(1, weight=1)
+
+        prompt_var = tk.StringVar(value=prompt)
+        ttk.Label(container, textvariable=prompt_var, justify="left", anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
+        left = ttk.Frame(container)
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        left.rowconfigure(1, weight=1)
+        left.columnconfigure(0, weight=1)
+
+        ttk.Label(left, text="Options").grid(row=0, column=0, sticky="w")
+        option_list = tk.Listbox(left, exportselection=False)
+        option_scroll = ttk.Scrollbar(left, orient="vertical", command=option_list.yview)
+        option_list.configure(yscrollcommand=option_scroll.set)
+        for idx, option in enumerate(options):
+            option_list.insert("end", f"{idx}: {option}")
+        if options:
+            option_list.selection_set(0)
+        option_list.grid(row=1, column=0, sticky="nsew")
+        option_scroll.grid(row=1, column=1, sticky="ns")
+
+        entry_frame = ttk.Frame(left)
+        entry_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        entry_frame.columnconfigure(1, weight=1)
+        ttk.Label(entry_frame, text="Pick index or type AUTO").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        entry = ttk.Entry(entry_frame)
+        entry.grid(row=0, column=1, sticky="ew")
+
         if allow_skip:
-            msg += "\n\nEnter blank to skip."
-        while True:
-            ans = simpledialog.askstring(title, msg, parent=self.root)
-            if ans is None:
-                return None if allow_skip else 0
-            ans = ans.strip()
-            if allow_skip and ans == "":
-                return None
-            if ans.isdigit():
-                idx = int(ans)
-                if 0 <= idx < len(options):
-                    return idx
-            messagebox.showerror("Invalid choice", "Please enter a valid index.", parent=self.root)
+            ttk.Label(left, text="Blank entry skips this choice.").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        right = ttk.Frame(container)
+        right.grid(row=1, column=1, sticky="nsew")
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+        ttk.Label(right, text="Live information").grid(row=0, column=0, sticky="w")
+        info_box = tk.Text(right, wrap="word")
+        info_scroll = ttk.Scrollbar(right, orient="vertical", command=info_box.yview)
+        info_box.configure(yscrollcommand=info_scroll.set)
+        info_box.grid(row=1, column=0, sticky="nsew")
+        info_scroll.grid(row=1, column=1, sticky="ns")
+
+        def set_info(text_value: str) -> None:
+            info_box.configure(state="normal")
+            info_box.delete("1.0", "end")
+            info_box.insert("1.0", text_value)
+            info_box.configure(state="disabled")
+
+        def refresh_info() -> None:
+            sections = [self._match_state_text(viewer_name)]
+            tournament_text = self._tournament_state_text(viewer_name)
+            if tournament_text.strip() and tournament_text.strip() != "No live tournament state available.":
+                sections.append(tournament_text)
+            set_info("\n\n".join(sections))
+
+        def commit_index(value: Optional[int]) -> None:
+            result["value"] = value
+            dialog.destroy()
+
+        def handle_entry_submission(raw: str) -> None:
+            handled, parsed = self._handle_special_entry(raw, allow_skip)
+            if handled:
+                commit_index(None)
+                return
+            if parsed is not None and 0 <= parsed < len(options):
+                commit_index(parsed)
+                return
+            messagebox.showerror("Invalid choice", "Please enter a valid index or type AUTO.", parent=dialog)
+
+        def on_choose_selected() -> None:
+            selection = option_list.curselection()
+            if selection:
+                commit_index(int(selection[0]))
+                return
+            handle_entry_submission(entry.get())
+
+        def on_submit_entry(_event=None) -> None:
+            handle_entry_submission(entry.get())
+
+        def on_cancel() -> None:
+            commit_index(None if allow_skip else 0)
+
+        button_row = ttk.Frame(container)
+        button_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(button_row, text="Choose selected", command=on_choose_selected).pack(side="left")
+        ttk.Button(button_row, text="Refresh", command=refresh_info).pack(side="left", padx=(6, 0))
+        ttk.Button(button_row, text="Current match state", command=lambda: self._show_text_popup("Current Match State", self._match_state_text(viewer_name))).pack(side="left", padx=(6, 0))
+        ttk.Button(button_row, text="Tournament position", command=lambda: self._show_text_popup("Tournament Position", self._tournament_state_text(viewer_name))).pack(side="left", padx=(6, 0))
+        ttk.Button(button_row, text="Auto", command=lambda: (self._prompt_auto_mode(), commit_index(None))).pack(side="left", padx=(6, 0))
+        ttk.Button(button_row, text="Cancel", command=on_cancel).pack(side="right")
+
+        option_list.bind("<Double-Button-1>", lambda _event: on_choose_selected())
+        entry.bind("<Return>", on_submit_entry)
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        refresh_info()
+        entry.focus_set()
+        dialog.wait_window()
+        return result["value"]
 
     def choose_gate_to_set(self, player: PlayerProfile, remaining_gate_indices: List[int]) -> int:
         options = [f"[{i}] {player.collection_gates[i].name} ({player.collection_gates[i].gate_type.value})" for i in remaining_gate_indices]
-        choice = self._ask_choice("Choose Gate", f"{player.name}: choose a gate to set", options)
+        choice = self._ask_choice("Choose Gate", f"{player.name}: choose a gate to set", options, viewer_name=player.name)
         if choice is None:
             return remaining_gate_indices[0]
         return remaining_gate_indices[choice]
 
+    def choose_gate_to_set_before_roll(self, player: PlayerProfile, remaining_gate_indices: List[int], field_descriptions: List[str]) -> Optional[int]:
+        gate_options = [f"[{i}] {player.collection_gates[i].name} ({player.collection_gates[i].gate_type.value})" for i in remaining_gate_indices]
+        prompt_lines = [f"{player.name}: set a gate card before rolling?"]
+        if field_descriptions:
+            prompt_lines.append("Field:")
+            prompt_lines.extend(field_descriptions)
+        choice = self._ask_choice("Set Gate Before Roll", "\n".join(prompt_lines), gate_options, allow_skip=True, viewer_name=player.name)
+        if choice is None:
+            return None
+        return remaining_gate_indices[choice]
+
     def choose_bakugan_to_roll(self, player: PlayerProfile, remaining_bakugan_indices: List[int]) -> int:
         options = [f"[{i}] {player.collection_bakugan[i].name} {player.collection_bakugan[i].attribute.value} {player.collection_bakugan[i].base_g} G" for i in remaining_bakugan_indices]
-        choice = self._ask_choice("Choose Bakugan", f"{player.name}: choose Bakugan to roll", options)
+        choice = self._ask_choice("Choose Bakugan", f"{player.name}: choose Bakugan to roll", options, viewer_name=player.name)
         if choice is None:
             return remaining_bakugan_indices[0]
         return remaining_bakugan_indices[choice]
 
+    def choose_bakugan_or_gate_before_roll(self, player: PlayerProfile, remaining_bakugan_indices: List[int], remaining_gate_indices: List[int], field_descriptions: List[str]) -> Tuple[str, Optional[int]]:
+        options = []
+        gate_offset = 0
+        if remaining_gate_indices:
+            options.append("Set a gate card first")
+            gate_offset = 1
+        options.extend(
+            f"Roll [{i}] {player.collection_bakugan[i].name} {player.collection_bakugan[i].attribute.value} {player.collection_bakugan[i].base_g} G"
+            for i in remaining_bakugan_indices
+        )
+        prompt_lines = [f"{player.name}: choose Bakugan to roll"]
+        if remaining_gate_indices:
+            prompt_lines.append("You can also set a gate card before rolling.")
+        if field_descriptions:
+            prompt_lines.append("Field:")
+            prompt_lines.extend(field_descriptions)
+        choice = self._ask_choice("Choose Bakugan", "\n".join(prompt_lines), options, viewer_name=player.name)
+        if choice is None:
+            return ("bakugan", remaining_bakugan_indices[0])
+        if remaining_gate_indices and choice == 0:
+            gate_options = [f"[{i}] {player.collection_gates[i].name} ({player.collection_gates[i].gate_type.value})" for i in remaining_gate_indices]
+            gate_choice = self._ask_choice("Set Gate Before Roll", f"{player.name}: choose a gate to set before rolling", gate_options, allow_skip=True, viewer_name=player.name)
+            if gate_choice is None:
+                return self.choose_bakugan_or_gate_before_roll(player, remaining_bakugan_indices, remaining_gate_indices, field_descriptions)
+            return ("gate", remaining_gate_indices[gate_choice])
+        baku_choice = choice - gate_offset
+        if 0 <= baku_choice < len(remaining_bakugan_indices):
+            return ("bakugan", remaining_bakugan_indices[baku_choice])
+        return ("bakugan", remaining_bakugan_indices[0])
+
     def choose_target_gate(self, player: PlayerProfile, field_descriptions: List[str]) -> int:
-        choice = self._ask_choice("Choose Target Gate", f"{player.name}: choose gate to aim at", field_descriptions)
+        choice = self._ask_choice("Choose Target Gate", f"{player.name}: choose gate to aim at", field_descriptions, viewer_name=player.name)
         return 0 if choice is None else choice
 
     def choose_roll_ability(self, player: PlayerProfile, options: List[int]) -> Optional[int]:
         if not options:
             return None
         labels = [f"[{i}] {player.collection_abilities[i].name}" for i in options]
-        choice = self._ask_choice("Roll Ability", f"{player.name}: choose a roll ability", labels, allow_skip=True)
+        choice = self._ask_choice("Roll Ability", f"{player.name}: choose a roll ability", labels, allow_skip=True, viewer_name=player.name)
         return None if choice is None else options[choice]
 
     def choose_battle_ability(self, player: PlayerProfile, options: List[int], context: str) -> Optional[int]:
         if not options:
             return None
         labels = [f"[{i}] {player.collection_abilities[i].name}" for i in options]
-        choice = self._ask_choice("Battle Ability", f"{player.name}: choose a battle ability\n{context}", labels, allow_skip=True)
+        choice = self._ask_choice("Battle Ability", f"{player.name}: choose a battle ability\n{context}", labels, allow_skip=True, viewer_name=player.name)
         return None if choice is None else options[choice]
 
     def choose_double_stand_action(self, player: PlayerProfile, current_gate_desc: str, other_gate_desc: str) -> str:
@@ -1704,7 +2151,7 @@ class TkManualChoiceHandler(ManualChoiceHandler):
             f"Win current gate now: {current_gate_desc}",
             f"Move newest Bakugan to other gate: {other_gate_desc}",
         ]
-        choice = self._ask_choice("Double Stand", f"{player.name}: choose what to do after a double stand", options)
+        choice = self._ask_choice("Double Stand", f"{player.name}: choose what to do after a double stand", options, viewer_name=player.name)
         return "capture" if choice in (None, 0) else "move"
 
 
@@ -1763,8 +2210,171 @@ class Match:
             self.manual_handler is not None
             and player.name == self.manual_player_name
             and not getattr(self.manual_handler, "auto_rest", False)
+            and not getattr(self.manual_handler, "auto_match", False)
         )
 
+    def _manual_player(self) -> Optional[PlayerProfile]:
+        if self.manual_player_name is None:
+            return None
+        for player in self.players:
+            if player.name == self.manual_player_name:
+                return player
+        return None
+
+    def _format_match_card_summary(self, player: PlayerProfile, viewer: Optional[PlayerProfile] = None) -> List[str]:
+        remaining_bakugan = [
+            f"[{idx}] {player.collection_bakugan[idx].name} {player.collection_bakugan[idx].attribute.value} {player.collection_bakugan[idx].base_g} G"
+            for idx in self.remaining_bakugan_cycle_idx[player.name]
+            if idx not in self.removed_bakugan_idx[player.name]
+        ]
+        used_bakugan = [
+            f"[{idx}] {player.collection_bakugan[idx].name}"
+            for idx in self.used_bakugan_idx[player.name]
+            if idx not in self.removed_bakugan_idx[player.name]
+        ]
+        removed_bakugan = [
+            f"[{idx}] {player.collection_bakugan[idx].name}"
+            for idx in sorted(self.removed_bakugan_idx[player.name])
+        ]
+        remaining_gates = [
+            f"[{idx}] {player.collection_gates[idx].name} ({player.collection_gates[idx].gate_type.value})"
+            for idx in self.remaining_gate_idx[player.name]
+        ]
+        used_abilities = set(self.used_ability_idx[player.name])
+        remaining_abilities = [
+            f"[{idx}] {player.collection_abilities[idx].name} ({player.collection_abilities[idx].color.value})"
+            for idx in player.active_ability_idx
+            if idx not in used_abilities
+        ]
+        spent_abilities = [
+            f"[{idx}] {player.collection_abilities[idx].name} ({player.collection_abilities[idx].color.value})"
+            for idx in player.active_ability_idx
+            if idx in used_abilities
+        ]
+        show_gate_pool = viewer is None or viewer.name == player.name
+        gate_line = (
+            f"  Remaining Gates: {' | '.join(remaining_gates) if remaining_gates else 'none'}"
+            if show_gate_pool else
+            "  Remaining Gates: hidden"
+        )
+        return [
+            f"{player.name} status",
+            f"  Score: {len(self.captured[player.name])} captured gate(s)",
+            f"  Captured gates: {', '.join(g.name for g in self.captured[player.name]) if self.captured[player.name] else 'none'}",
+            f"  Remaining Bakugan: {' | '.join(remaining_bakugan) if remaining_bakugan else 'none'}",
+            f"  Used Bakugan: {' | '.join(used_bakugan) if used_bakugan else 'none'}",
+            f"  Removed Bakugan: {' | '.join(removed_bakugan) if removed_bakugan else 'none'}",
+            gate_line,
+            f"  Remaining Abilities: {' | '.join(remaining_abilities) if remaining_abilities else 'none'}",
+            f"  Spent Abilities: {' | '.join(spent_abilities) if spent_abilities else 'none'}",
+        ]
+
+    def manual_match_state_text(self, viewer_name: Optional[str] = None) -> str:
+        viewer = None
+        if viewer_name is not None:
+            viewer = next((p for p in self.players if p.name == viewer_name), None)
+        lines = [
+            f"Turn {self.turn_count}",
+            f"Current player: {self.current_player().name}",
+            f"Current score: {self.players[0].name} {len(self.captured[self.players[0].name])} | {self.players[1].name} {len(self.captured[self.players[1].name])}",
+            "",
+            "Field state",
+        ]
+        if self.field:
+            for idx, field_gate in enumerate(self.field):
+                lines.append(f"  [{idx}] {self._field_gate_description_for_player(viewer, field_gate)}")
+        else:
+            lines.append("  No gates on the field.")
+        lines.append("")
+        for player in self.players:
+            lines.extend(self._format_match_card_summary(player, viewer))
+            lines.append("")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return "\n".join(lines)
+
+    def _field_gate_name_visible_to(self, viewer: Optional[PlayerProfile], field_gate: FieldGate) -> bool:
+        if field_gate.revealed:
+            return True
+        if viewer is None:
+            return True
+        return field_gate.set_by_player_name == viewer.name
+
+    def _field_gate_display_name(self, viewer: Optional[PlayerProfile], field_gate: FieldGate) -> str:
+        if self._field_gate_name_visible_to(viewer, field_gate):
+            return field_gate.gate_card.name
+        return "Hidden Gate"
+
+    def _field_gate_description_for_player(self, viewer: Optional[PlayerProfile], field_gate: FieldGate) -> str:
+        gate_name = self._field_gate_display_name(viewer, field_gate)
+        setter = "you" if viewer is not None and field_gate.set_by_player_name == viewer.name else field_gate.set_by_player_name
+        occ = ", ".join(f"{b.owner_name}:{b.name}" for b in field_gate.bakugan_on_card) or "empty"
+        return f"{gate_name} | set by {setter} | {occ}"
+
+    def _reveal_field_gate(self, gate_idx: int) -> None:
+        if 0 <= gate_idx < len(self.field):
+            self.field[gate_idx].revealed = True
+
+    def choose_gate_to_set_before_roll(self, player: PlayerProfile) -> Optional[int]:
+        options = list(self.remaining_gate_idx[player.name])
+        if len(self.field) >= 2 or not options:
+            return None
+
+        if self.player_is_manual(player):
+            field_descriptions = [self._field_gate_description_for_player(player, fg) for fg in self.field]
+            manual_choice = self.manual_handler.choose_gate_to_set_before_roll(player, options, field_descriptions)
+            if not getattr(self.manual_handler, "auto_rest", False):
+                return manual_choice
+
+        if not self.field:
+            return self.choose_gate_to_set(player)
+
+        smartness = clamp(player.intelligence, 0.2, 0.99)
+        active_bakus = [player.collection_bakugan[i] for i in player.active_bakugan_idx if 0 <= i < len(player.collection_bakugan)]
+        best_idx = None
+        best_score = float("-inf")
+        for idx in options:
+            gate = player.collection_gates[idx]
+            score = gate_profile_value(player, gate, active_bakus=active_bakus, intelligence_override=smartness)
+            score += gate_profile_archetype_bonus(player, gate, active_bakus, intelligence_override=smartness)
+            score += self.random.uniform(-20, 20) * (1.0 - smartness)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        threshold = 18.0 + 42.0 * smartness
+        if best_idx is not None and best_score >= threshold:
+            return best_idx
+        return best_idx if player.style in {PlayerStyle.AGGRESSIVE, PlayerStyle.COMBO, PlayerStyle.OPPORTUNIST} else None
+
+    def maybe_set_gate_before_roll(self, player: PlayerProfile) -> bool:
+        gate_idx = self.choose_gate_to_set_before_roll(player)
+        if gate_idx is None:
+            return False
+        gate = clone_gate(player.collection_gates[gate_idx])
+        self.remaining_gate_idx[player.name].remove(gate_idx)
+        self.match_stats[player.name].gates_set += 1
+        self.field.append(FieldGate(gate_card=gate, set_by_player_name=player.name, revealed=False))
+        self.log(f"{player.name} sets a gate card to the field")
+        return True
+
+    def _establish_initial_field(self) -> bool:
+        if self.field:
+            return True
+        setup_order = [self.current_player(), self.other_player()]
+        placed_any = False
+        for player in setup_order:
+            if len(self.field) >= 2:
+                break
+            if not self.remaining_gate_idx[player.name]:
+                continue
+            gate_idx = self.choose_gate_to_set(player)
+            gate = clone_gate(player.collection_gates[gate_idx])
+            self.remaining_gate_idx[player.name].remove(gate_idx)
+            self.match_stats[player.name].gates_set += 1
+            self.field.append(FieldGate(gate_card=gate, set_by_player_name=player.name, revealed=False))
+            self.log(f"{player.name} sets a gate card to the field")
+            placed_any = True
+        return placed_any
 
     def _strategic_plan(self, player: PlayerProfile) -> Dict[str, float]:
         smartness = clamp(player.intelligence, 0.2, 0.99)
@@ -1859,16 +2469,47 @@ class Match:
 
         return plan
 
+    def _standing_bakugan_indices_for_player(self, player: PlayerProfile) -> Set[int]:
+        standing: Set[int] = set()
+        signatures = set()
+        for fg in self.field:
+            for bakugan in fg.bakugan_on_card:
+                if bakugan.owner_name != player.name:
+                    continue
+                signatures.add((bakugan.name, bakugan.attribute, bakugan.base_g))
+        if not signatures:
+            return standing
+        for idx in player.active_bakugan_idx:
+            candidate = player.collection_bakugan[idx]
+            if (candidate.name, candidate.attribute, candidate.base_g) in signatures:
+                standing.add(idx)
+        return standing
+
     def _remaining_bakugan_for_turn(self, player: PlayerProfile) -> List[int]:
+        standing_idx = self._standing_bakugan_indices_for_player(player)
         remaining = [
             i for i in player.active_bakugan_idx
-            if i not in self.used_bakugan_idx[player.name] and i not in self.removed_bakugan_idx[player.name]
+            if i not in self.used_bakugan_idx[player.name] and i not in self.removed_bakugan_idx[player.name] and i not in standing_idx
         ]
         if not remaining:
-            self.used_bakugan_idx[player.name].clear()
-            remaining = [i for i in player.active_bakugan_idx if i not in self.removed_bakugan_idx[player.name]]
+            refreshed_used = [
+                i for i in self.used_bakugan_idx[player.name]
+                if i in standing_idx or i in self.removed_bakugan_idx[player.name]
+            ]
+            self.used_bakugan_idx[player.name] = refreshed_used
+            remaining = [
+                i for i in player.active_bakugan_idx
+                if i not in self.removed_bakugan_idx[player.name] and i not in standing_idx
+            ]
             if remaining:
-                self.log(f"{player.name} refreshes Bakugan and can reuse their loadout")
+                if standing_idx:
+                    locked_names = ", ".join(
+                        f"{player.collection_bakugan[i].name} {player.collection_bakugan[i].attribute.value}"
+                        for i in player.active_bakugan_idx if i in standing_idx
+                    )
+                    self.log(f"{player.name} refreshes Bakugan. Standing Bakugan stay committed: {locked_names}")
+                else:
+                    self.log(f"{player.name} refreshes Bakugan and can reuse their loadout")
         return remaining
 
     def _unused_abilities(self, player: PlayerProfile, timings: Optional[List[Timing]] = None) -> List[int]:
@@ -2045,20 +2686,11 @@ class Match:
             fg.bakugan_on_card.clear()
 
     def setup_field_if_needed(self) -> None:
-        if len(self.field) >= 2:
+        if self.field or len(self.field) >= 2:
             return
-
-        for player in self.players:
-            if len(self.field) >= 2:
-                break
-            if not self.remaining_gate_idx[player.name]:
-                continue
-            gate_idx = self.choose_gate_to_set(player)
-            gate = clone_gate(player.collection_gates[gate_idx])
-            self.remaining_gate_idx[player.name].remove(gate_idx)
-            self.match_stats[player.name].gates_set += 1
-            self.field.append(FieldGate(gate_card=gate, set_by_player_name=player.name))
-            self.log(f"{player.name} sets {gate.name} to the field")
+        player = self.current_player()
+        if self.remaining_gate_idx[player.name]:
+            self.maybe_set_gate_before_roll(player)
 
     def choose_gate_to_set(self, player: PlayerProfile) -> int:
         options = list(self.remaining_gate_idx[player.name])
@@ -2093,9 +2725,24 @@ class Match:
     def choose_bakugan_to_roll(self, player: PlayerProfile) -> int:
         remaining = self._remaining_bakugan_for_turn(player)
         if self.player_is_manual(player):
-            manual_choice = self.manual_handler.choose_bakugan_to_roll(player, remaining)
-            if not getattr(self.manual_handler, "auto_rest", False):
-                return manual_choice
+            remaining_gates = list(self.remaining_gate_idx[player.name]) if len(self.field) < 2 else []
+            field_descriptions = [self._field_gate_description_for_player(player, fg) for fg in self.field]
+            while True:
+                choice_kind, manual_choice = self.manual_handler.choose_bakugan_or_gate_before_roll(player, remaining, remaining_gates, field_descriptions)
+                if getattr(self.manual_handler, "auto_rest", False) or getattr(self.manual_handler, "auto_match", False):
+                    break
+                if choice_kind == "gate" and manual_choice is not None and manual_choice in self.remaining_gate_idx[player.name] and len(self.field) < 2:
+                    gate = clone_gate(player.collection_gates[manual_choice])
+                    self.remaining_gate_idx[player.name].remove(manual_choice)
+                    self.match_stats[player.name].gates_set += 1
+                    self.field.append(FieldGate(gate_card=gate, set_by_player_name=player.name, revealed=False))
+                    self.log(f"{player.name} sets a gate card to the field")
+                    remaining_gates = list(self.remaining_gate_idx[player.name]) if len(self.field) < 2 else []
+                    field_descriptions = [self._field_gate_description_for_player(player, fg) for fg in self.field]
+                    continue
+                if manual_choice is not None:
+                    return manual_choice
+                break
 
         smartness = clamp(player.intelligence, 0.2, 0.99)
         plan = self._strategic_plan(player)
@@ -2137,12 +2784,7 @@ class Match:
     def choose_target_gate(self, player: PlayerProfile, bakugan_idx: int) -> int:
         bakugan = player.collection_bakugan[bakugan_idx]
         if self.player_is_manual(player):
-            descriptions = []
-            for fg in self.field:
-                desc = f"{fg.gate_card.name} | set by {fg.set_by_player_name}"
-                occ = ", ".join(f"{b.owner_name}:{b.name}" for b in fg.bakugan_on_card) or "empty"
-                desc += f" | {occ}"
-                descriptions.append(desc)
+            descriptions = [self._field_gate_description_for_player(player, fg) for fg in self.field]
             manual_choice = self.manual_handler.choose_target_gate(player, descriptions)
             if not getattr(self.manual_handler, "auto_rest", False):
                 return manual_choice
@@ -2326,9 +2968,11 @@ class Match:
         landed_gate_idx = None
         if roll < accuracy:
             landed_gate_idx = target_gate_idx
+            self._reveal_field_gate(landed_gate_idx)
             self.log(f"{player.name} lands on intended gate {self.field[landed_gate_idx].gate_card.name}")
         elif len(self.field) > 1 and roll < accuracy + drift:
             landed_gate_idx = 1 - target_gate_idx
+            self._reveal_field_gate(landed_gate_idx)
             self.log(f"{player.name} drifts onto {self.field[landed_gate_idx].gate_card.name}")
         else:
             self.used_bakugan_idx[player.name].append(bakugan_idx)
@@ -3392,17 +4036,28 @@ class Match:
         self.log(f"{p2.name}: {old2.rating:.0f} -> {p2.glicko.rating:.0f}")
 
     def play(self) -> Tuple[PlayerProfile, Dict[str, float], List[str]]:
+        if self.manual_handler is not None and hasattr(self.manual_handler, "begin_match"):
+            self.manual_handler.begin_match(self.manual_match_state_text)
         self.log(f"Match start: {self.players[0].name} vs {self.players[1].name}")
         while self.turn_count <= self.max_turns:
             self.log("")
             self.log(f"Turn {self.turn_count}")
-            self.setup_field_if_needed()
-            if not self.field:
-                break
 
             player = self.current_player()
             self.log(f"Current player: {player.name}")
             self.log(f"Score: {self.players[0].name} {len(self.captured[self.players[0].name])} | {self.players[1].name} {len(self.captured[self.players[1].name])}")
+
+            if not self.field:
+                self._establish_initial_field()
+            else:
+                self.maybe_set_gate_before_roll(player)
+            if not self.field:
+                self.log(f"{player.name} has no gate in play and cannot roll this turn")
+                winner = self.check_winner()
+                if winner is not None:
+                    break
+                self.end_turn()
+                continue
 
             baku_idx = self.choose_bakugan_to_roll(player)
             target_gate_idx = self.choose_target_gate(player, baku_idx)
@@ -3439,6 +4094,8 @@ class Match:
 
         perf = {p.name: self.performance_score(p) for p in self.players}
         self.log(f"Match end: winner {winner.name}")
+        if self.manual_handler is not None and hasattr(self.manual_handler, "end_match"):
+            self.manual_handler.end_match()
         return winner, perf, list(self.logger.lines)
 
 
@@ -3457,6 +4114,35 @@ class SwissTournament:
         self.match_logs: List[Tuple[int, str]] = []
         self.manual_handler = manual_handler
         self.manual_player_name = manual_player_name
+
+    def manual_tournament_state_text(self, viewer_name: Optional[str] = None) -> str:
+        standings = self.standings()
+        lines = [f"Swiss standings after {len(self.records)} recorded match(es)", f"Rounds: {self.rounds}"]
+        if viewer_name:
+            viewer = next((p for p in standings if p.name == viewer_name), None)
+            if viewer is not None:
+                place = next((idx for idx, p in enumerate(standings, start=1) if p.name == viewer_name), None)
+                avg_perf = viewer.tourney.performance_total / viewer.tourney.matches_played if viewer.tourney.matches_played else 0.0
+                lines.extend([
+                    "",
+                    f"Your current position: {place}",
+                    f"Points: {viewer.tourney.score:.1f}",
+                    f"Wins/Losses: {viewer.tourney.wins}/{viewer.tourney.losses}",
+                    f"Buchholz: {viewer.tourney.buchholz:.1f}",
+                    f"Gate diff: {viewer.tourney.gate_diff}",
+                    f"Battle diff: {viewer.tourney.battle_diff}",
+                    f"Average performance: {avg_perf:.1f}",
+                    f"Rating: {viewer.glicko.rating:.1f}",
+                    f"Opponents faced: {', '.join(viewer.tourney.opponents) if viewer.tourney.opponents else 'none yet'}",
+                ])
+        lines.append("")
+        lines.append("Top standings")
+        for idx, player in enumerate(standings[:12], start=1):
+            avg_perf = player.tourney.performance_total / player.tourney.matches_played if player.tourney.matches_played else 0.0
+            lines.append(
+                f"{idx}. {player.name} | Pts {player.tourney.score:.1f} | W-L {player.tourney.wins}-{player.tourney.losses} | Buch {player.tourney.buchholz:.1f} | GateDiff {player.tourney.gate_diff} | BattleDiff {player.tourney.battle_diff} | AvgPerf {avg_perf:.1f} | Rating {player.glicko.rating:.1f}"
+            )
+        return "\n".join(lines)
 
     def recompute_buchholz(self) -> None:
         score_map = {p.name: p.tourney.score for p in self.players}
@@ -3500,6 +4186,8 @@ class SwissTournament:
         return pairings
 
     def run(self) -> None:
+        if self.manual_handler is not None and hasattr(self.manual_handler, "set_tournament_state_provider"):
+            self.manual_handler.set_tournament_state_provider(self.manual_tournament_state_text)
         for round_no in range(1, self.rounds + 1):
             print(f"\n========== ROUND {round_no} ==========")
             for p1, p2 in self.swiss_pairings():
@@ -3581,7 +4269,7 @@ class SwissTournament:
             lines.append("")
             lines.append(f"{idx}. {p.name}")
             lines.extend(player_loadout_lines(p, "   "))
-        summary_path.write_text("\n".join(lines), encoding="utf-8")
+        summary_path = maybe_write_text(summary_path, "\n".join(lines), encoding="utf-8") or summary_path
 
         play_path = None
         if save_play_by_play:
@@ -3592,7 +4280,7 @@ class SwissTournament:
                 text_lines.append("")
                 text_lines.append(f"========== ROUND {round_no} MATCH ==========")
                 text_lines.append(text)
-            play_path.write_text("\n".join(text_lines), encoding="utf-8")
+            play_path = maybe_write_text(play_path, "\n".join(text_lines), encoding="utf-8") or play_path
         return summary_path, play_path
 
 
@@ -3606,6 +4294,48 @@ class KnockoutTournament:
         self.manual_player_name = manual_player_name
         self.result = KnockoutResult()
         self.play_logs: List[str] = []
+
+    def manual_tournament_state_text(self, viewer_name: Optional[str] = None) -> str:
+        active_players = self.players[:]
+        round_names = []
+        size = len(active_players)
+        while size > 1:
+            if size == 2:
+                round_names.append("Final")
+            elif size == 4:
+                round_names.append("Semifinal")
+            elif size == 8:
+                round_names.append("Quarterfinal")
+            else:
+                round_names.append(f"Round of {size}")
+            size = (size + 1) // 2
+        current_round = round_names[min(len(self.result.rounds), max(0, len(round_names) - 1))] if round_names else "Final"
+        lines = [f"Knockout bracket status", f"Current stage: {current_round}"]
+        if viewer_name:
+            if viewer_name in self.result.placements:
+                lines.append("")
+                lines.append(f"Your current placement is locked: {self.result.placements[viewer_name]}")
+            else:
+                lines.append("")
+                lines.append("You are still alive in the bracket.")
+        if self.result.rounds:
+            lines.append("")
+            lines.append("Completed rounds")
+            for idx, round_records in enumerate(self.result.rounds, start=1):
+                lines.append(f"Round block {idx}")
+                for p1, p2, winner in round_records:
+                    lines.append(f"  {p1} vs {p2} | Winner {winner}")
+        if self.result.placements:
+            lines.append("")
+            lines.append("Locked placements")
+            for name, finish in sorted(self.result.placements.items(), key=lambda x: (x[1], x[0]))[:16]:
+                lines.append(f"  {finish}. {name}")
+        remaining = [p.name for p in self.players if p.name not in self.result.placements]
+        if remaining:
+            lines.append("")
+            lines.append("Players still in the bracket")
+            lines.append("  " + ", ".join(remaining))
+        return "\n".join(lines)
 
     def bracket_seed_order(self, players: List[PlayerProfile]) -> List[PlayerProfile]:
         seeded = sorted(players, key=lambda p: p.glicko.rating, reverse=True)
@@ -3629,6 +4359,8 @@ class KnockoutTournament:
         return (start, end)
 
     def run(self) -> KnockoutResult:
+        if self.manual_handler is not None and hasattr(self.manual_handler, "set_tournament_state_provider"):
+            self.manual_handler.set_tournament_state_provider(self.manual_tournament_state_text)
         current = self.players[:]
         while len(current) > 1:
             size = len(current)
@@ -3646,6 +4378,14 @@ class KnockoutTournament:
             winners = []
             round_records = []
             eliminated_this_round = []
+            if len(seeded) % 2 == 1:
+                bye_player = seeded.pop(0)
+                winners.append(bye_player)
+                round_records.append((bye_player.name, "BYE", bye_player.name))
+                print(f"{bye_player.name} receives a bye")
+                self.play_logs.append(f"========== {round_name.upper()} ==========")
+                self.play_logs.append(f"{bye_player.name} receives a bye")
+                self.play_logs.append("")
             for i in range(0, len(seeded), 2):
                 p1, p2 = seeded[i], seeded[i + 1]
                 expected1 = glicko2_expected_score(p1.glicko, p2.glicko)
@@ -3727,12 +4467,12 @@ class KnockoutTournament:
         for p in ordered_players:
             lines.append("")
             lines.extend(player_loadout_lines(p))
-        summary_path.write_text("\n".join(lines), encoding="utf-8")
+        summary_path = maybe_write_text(summary_path, "\n".join(lines), encoding="utf-8") or summary_path
 
         play_path = None
         if save_play_by_play:
             play_path = get_current_output_dir() / build_output_filename("knockout_playbyplay", len(self.players), None, random_suffix(random.Random(seed + 2002)))
-            play_path.write_text("\n".join(self.play_logs), encoding="utf-8")
+            play_path = maybe_write_text(play_path, "\n".join(self.play_logs), encoding="utf-8") or play_path
         return summary_path, play_path
 
 
@@ -4024,6 +4764,9 @@ def format_loadout_snapshot_lines(snapshot: Dict[str, object], prefix: str = "")
 
 def summarize_archive_lines(archive: Dict) -> List[str]:
     lines: List[str] = []
+    label = str(archive.get("label", "") or "").strip()
+    if label:
+        lines.append(f"Label: {label}")
     lines.append(
         f"Season {archive['season']} Event {archive['event_no']} | {archive['tournament_type']} | Participants {archive['participant_count']} | Winner {archive.get('winner', 'Unknown')}"
     )
@@ -4031,41 +4774,29 @@ def summarize_archive_lines(archive: Dict) -> List[str]:
     if standings:
         lines.append("Standings:")
         for row in standings[: min(16, len(standings))]:
+            wins = row.get('wins', (archive.get('entrant_lookup', {}) or {}).get(row.get('name', ''), {}).get('tourney', {}).get('wins', 0))
+            losses = row.get('losses', (archive.get('entrant_lookup', {}) or {}).get(row.get('name', ''), {}).get('tourney', {}).get('losses', 0))
             lines.append(
-                f"  {row.get('position', '?'):>2}. {row.get('name', '?')} | Finish {row.get('finish', '?')} | Rating {row.get('rating', 0):.1f} | Titles {row.get('titles', 0)} | Money £{row.get('money', 0)}"
+                f"  {row.get('position', '?'):>2}. {row.get('name', '?')} | Finish {row.get('finish', '?')} | Rating {row.get('rating', 0):.1f} | W-L {int(wins)}-{int(losses)} | Titles {row.get('titles', 0)} | Money £{row.get('money', 0)}"
             )
-    entrants = archive.get("entrants", [])
-    if entrants:
+    parallel_leagues = archive.get("parallel_leagues", [])
+    if parallel_leagues:
         lines.append("")
-        lines.append("Entrant snapshots:")
-        for snap in entrants:
-            lines.append(
-                f"- {snap['name']} | Attr {snap['chosen_attribute']} | Style {snap['style']} | Rating {snap['glicko']['rating']:.1f} | Money £{snap['money']} | Titles {snap.get('tournament_titles', 0)}"
-            )
-            baku = snap.get('collection_bakugan', [])
-            active_b = snap.get('active_bakugan_idx', [])
-            if baku and active_b:
-                lines.append('    Bakugan:')
-                for idx in active_b:
-                    if 0 <= idx < len(baku):
-                        b = baku[idx]
-                        lines.append(f"      {b['name']} | {b['attribute']} | {b['base_g']} G")
-            gates = snap.get('collection_gates', [])
-            active_g = snap.get('active_gate_idx', [])
-            if gates and active_g:
-                lines.append('    Gates:')
-                for idx in active_g:
-                    if 0 <= idx < len(gates):
-                        g = gates[idx]
-                        lines.append(f"      {g['name']} | {g['gate_type']}")
-            abilities = snap.get('collection_abilities', [])
-            active_a = snap.get('active_ability_idx', [])
-            if abilities and active_a:
-                lines.append('    Abilities:')
-                for idx in active_a:
-                    if 0 <= idx < len(abilities):
-                        a = abilities[idx]
-                        lines.append(f"      {a['name']} | {a['color']}")
+        lines.append("Parallel league tournaments:")
+        for league in parallel_leagues:
+            league_label = str(league.get('league', '?'))
+            tournament_no = int(league.get('tournament_no', 0) or 0)
+            if tournament_no > 0:
+                league_label = f"{league_label} #{tournament_no}"
+            winner = str(league.get('winner', '') or '').strip()
+            header = f"  {league_label} | {league.get('tournament_type', '?')} | Participants {int(league.get('participant_count', 0))}"
+            if winner:
+                header += f" | Winner {winner}"
+            lines.append(header)
+            for row in league.get("top5", [])[:5]:
+                lines.append(
+                    f"    {int(row.get('finish', 0))}. {row.get('name', '?')} | Rating {float(row.get('rating', 0.0)):.1f} | W-L {int(row.get('wins', 0))}-{int(row.get('losses', 0))}"
+                )
     return lines
 
 
@@ -4078,6 +4809,7 @@ def group_archives_by_season(archives: List[Dict]) -> Dict[int, List[Dict]]:
     return grouped
 
 
+
 def build_season_summary_lines(archives: List[Dict], season: int, player_name: Optional[str] = None) -> List[str]:
     grouped = group_archives_by_season(archives)
     season_archives = grouped.get(season, [])
@@ -4086,22 +4818,50 @@ def build_season_summary_lines(archives: List[Dict], season: int, player_name: O
         return [f"No archives found for Season {season}."]
 
     player_finishes: List[int] = []
-    winners: Dict[str, int] = defaultdict(int)
     podiums: Dict[str, int] = defaultdict(int)
     finals: Dict[str, int] = defaultdict(int)
-    champion_ratings: List[Tuple[float, str, int]] = []
+    champion_ratings: List[Tuple[float, str, int, str]] = []
     title_holders: Dict[str, int] = defaultdict(int)
-    money_leaders: Dict[str, int] = defaultdict(int)
+    bakugan_usage: Dict[Tuple[str, str], int] = defaultdict(int)
+    attribute_usage: Dict[str, int] = defaultdict(int)
+    card_loadout_usage: Dict[Tuple[Tuple[str, ...], Tuple[str, ...]], int] = defaultdict(int)
+    total_bakugan_slots = 0
+    total_entrant_snapshots = 0
+    total_tournaments = len(season_archives) + sum(len(arc.get("parallel_leagues", []) or []) for arc in season_archives)
 
     lines.append(f"Season {season} Summary")
-    lines.append(f"Tournaments played: {len(season_archives)}")
+    lines.append(f"Tournaments played: {total_tournaments}")
     lines.append("")
     lines.append("Event champions:")
+
+    def absorb_entrant(entrant: Dict) -> None:
+        nonlocal total_bakugan_slots, total_entrant_snapshots
+        attr_name = str(entrant.get("chosen_attribute", "") or "")
+        if attr_name:
+            attribute_usage[attr_name] += 1
+        cb = entrant.get("collection_bakugan", [])
+        cg = entrant.get("collection_gates", [])
+        ca = entrant.get("collection_abilities", [])
+        gate_names: List[str] = []
+        ability_names: List[str] = []
+        for idx in entrant.get("active_bakugan_idx", [])[:3]:
+            if 0 <= idx < len(cb):
+                b = cb[idx]
+                bakugan_usage[(str(b.get("name", "?")), str(b.get("attribute", "?")))] += 1
+                total_bakugan_slots += 1
+        for idx in entrant.get("active_gate_idx", [])[:3]:
+            if 0 <= idx < len(cg):
+                gate_names.append(str(cg[idx].get("name", "?")))
+        for idx in entrant.get("active_ability_idx", [])[:3]:
+            if 0 <= idx < len(ca):
+                ability_names.append(str(ca[idx].get("name", "?")))
+        if gate_names or ability_names:
+            card_loadout_usage[(tuple(gate_names), tuple(ability_names))] += 1
+        total_entrant_snapshots += 1
 
     for arc in season_archives:
         event_no = int(arc.get("event_no", 0))
         winner = arc.get("winner", "Unknown")
-        winners[winner] += 1
         standings = arc.get("standings", [])
         participant_count = int(arc.get("participant_count", 0))
         winner_rating = 0.0
@@ -4115,20 +4875,68 @@ def build_season_summary_lines(archives: List[Dict], season: int, player_name: O
             if finish == 1:
                 title_holders[name] += 1
                 winner_rating = float(row.get("rating", 0.0))
-            if finish == 1:
-                money_leaders[name] = max(money_leaders[name], int(row.get("money", 0)))
             if player_name and name == player_name:
                 player_finishes.append(finish)
-        champion_ratings.append((winner_rating, winner, event_no))
+        champion_ratings.append((winner_rating, winner, event_no, str(arc.get("tournament_type", "?"))))
         event_label = "World Cup" if event_no == 0 and arc.get("tournament_type") == WORLD_CUP_TOURNAMENT_LABEL else f"Event {event_no}"
-        lines.append(f"  {event_label}: {winner} | {arc.get('tournament_type', '?')} | {participant_count} players | Winning rating {winner_rating:.0f}")
+        main_league = str(arc.get("league", "") or "").strip()
+        league_prefix = f"{main_league} | " if main_league else ""
+        lines.append(f"  {event_label}: {league_prefix}{winner} | {arc.get('tournament_type', '?')} | {participant_count} players | Winning rating {winner_rating:.0f}")
+
+        for entrant in arc.get("entrants", []):
+            absorb_entrant(entrant)
+
+        parallel_leagues = arc.get("parallel_leagues", []) or []
+        for idx, league in enumerate(parallel_leagues, start=1):
+            league_name = str(league.get("league", "?"))
+            tournament_no = int(league.get("tournament_no", idx) or idx)
+            league_winner = str(league.get("winner", "Unknown"))
+            league_type = str(league.get("tournament_type", "?"))
+            league_pc = int(league.get("participant_count", 0))
+            top5 = league.get("top5", []) or []
+            league_winner_rating = 0.0
+            for row in top5:
+                finish = int(row.get("finish", league_pc or 9999))
+                name = row.get("name", "?")
+                if finish <= 3:
+                    podiums[name] += 1
+                if finish <= 2:
+                    finals[name] += 1
+                if finish == 1:
+                    title_holders[name] += 1
+                    league_winner_rating = float(row.get("rating", 0.0))
+            champion_ratings.append((league_winner_rating, league_winner, event_no, f"{league_name} #{tournament_no}"))
+            lines.append(f"    {league_name} #{tournament_no}: {league_winner} | {league_type} | {league_pc} players | Winning rating {league_winner_rating:.0f}")
+
+    lines.append("")
+    lines.append("Season meta:")
+    if bakugan_usage:
+        lines.append("  Top 3 most used Bakugan:")
+        for idx, ((name, attr), count) in enumerate(sorted(bakugan_usage.items(), key=lambda x: (-x[1], x[0][0], x[0][1]))[:3], start=1):
+            pct = (count / max(1, total_bakugan_slots)) * 100.0
+            lines.append(f"    {idx}. {name} ({attr}) | {count} uses | {pct:.1f}%")
+    else:
+        lines.append("  Top 3 most used Bakugan: No data")
+    if attribute_usage:
+        attr_name, attr_count = sorted(attribute_usage.items(), key=lambda x: (-x[1], x[0]))[0]
+        pct = (attr_count / max(1, total_entrant_snapshots)) * 100.0
+        lines.append(f"  Most used attribute: {attr_name} | {attr_count} entrants | {pct:.1f}%")
+    else:
+        lines.append("  Most used attribute: No data")
+    if card_loadout_usage:
+        (gates, abilities), count = sorted(card_loadout_usage.items(), key=lambda x: (-x[1], x[0][0], x[0][1]))[0]
+        lines.append(f"  Most common card loadout: used {count} times")
+        lines.append(f"    Gates: {', '.join(gates) if gates else 'None'}")
+        lines.append(f"    Abilities: {', '.join(abilities) if abilities else 'None'}")
+    else:
+        lines.append("  Most common card loadout: No data")
 
     lines.append("")
     lines.append("Season leaderboards:")
     top_titles = sorted(title_holders.items(), key=lambda x: (-x[1], x[0]))[:5]
     top_podiums = sorted(podiums.items(), key=lambda x: (-x[1], x[0]))[:5]
     top_finals = sorted(finals.items(), key=lambda x: (-x[1], x[0]))[:5]
-    top_rated_champs = sorted(champion_ratings, key=lambda x: (-x[0], x[2]))[:5]
+    top_rated_champs = sorted(champion_ratings, key=lambda x: (-x[0], x[2], x[3]))[:5]
 
     lines.append("  Most titles this season:")
     for name, count in top_titles:
@@ -4140,8 +4948,7 @@ def build_season_summary_lines(archives: List[Dict], season: int, player_name: O
     for name, count in top_finals:
         lines.append(f"    {name}: {count}")
     lines.append("  Highest-rated event champions:")
-    for rating, name, event_no in top_rated_champs:
-        label = "World Cup" if event_no == 0 else f"Event {event_no}"
+    for rating, name, event_no, label in top_rated_champs:
         lines.append(f"    {label}: {name} at {rating:.0f}")
 
     if player_name:
@@ -4164,7 +4971,7 @@ def build_season_summary_lines(archives: List[Dict], season: int, player_name: O
                 standings = arc.get("standings", [])
                 for row in standings:
                     if row.get("name") == player_name:
-                        event_no = int(arc.get('event_no',0))
+                        event_no = int(arc.get('event_no', 0))
                         event_label = "World Cup" if event_no == 0 and arc.get("tournament_type") == WORLD_CUP_TOURNAMENT_LABEL else f"Event {event_no}"
                         lines.append(f"    {event_label}: Finish {int(row.get('finish', 0))} | Rating {float(row.get('rating', 0.0)):.1f} | Money £{int(row.get('money', 0))}")
                         break
@@ -4185,6 +4992,8 @@ def make_tournament_archive(season: int, event_no: int, tournament_type, partici
             "rating": snap['glicko']['rating'],
             "money": snap['money'],
             "titles": snap.get('tournament_titles', 0),
+            "wins": int((snap.get('tourney', {}) or {}).get('wins', 0)),
+            "losses": int((snap.get('tourney', {}) or {}).get('losses', 0)),
         })
     standings.sort(key=lambda x: (x['position'], -x['rating'], x['name']))
     return {
@@ -4199,6 +5008,7 @@ def make_tournament_archive(season: int, event_no: int, tournament_type, partici
         "play_path": str(play_path) if play_path else "",
         "standings": standings,
         "entrants": serialized_entrants,
+        "entrant_lookup": {snap["name"]: snap for snap in serialized_entrants},
     }
 
 # ============================================================
@@ -4390,6 +5200,110 @@ def _gate_named_double_bonus_count(gate: GateCard, active_bakus: Optional[List[B
     return sum(1 for b in active_bakus if _normalized_bakugan_name_key(b.name) == target)
 
 
+
+def _named_power_strike_target_key(ability: AbilityCard) -> Optional[str]:
+    name = str(getattr(ability, 'name', '') or '')
+    if not name.lower().endswith(' power strike'):
+        return None
+    base_name = name[:-13].strip()
+    return _normalized_bakugan_name_key(base_name) if base_name else None
+
+
+def _named_power_strike_amount(ability: AbilityCard) -> int:
+    for action in normalise_custom_effect(getattr(ability, 'custom_effect', None), getattr(ability, 'timing', 'FLEXIBLE')).get('actions', []):
+        if str(action.get('type', '')) == 'add_g':
+            try:
+                return int(action.get('amount', 0) or 0)
+            except Exception:
+                return 0
+    effect_id = str(getattr(ability, 'effect_id', '') or '')
+    if effect_id.endswith('_400'):
+        return 400
+    if effect_id.endswith('_200'):
+        return 200
+    if effect_id.endswith('_100'):
+        return 100
+    return 0
+
+
+def _named_power_strike_match_count(ability: AbilityCard, bakus: Optional[List[Bakugan]]) -> int:
+    if not bakus:
+        return 0
+    target = _named_power_strike_target_key(ability)
+    if not target:
+        return 0
+    return sum(1 for b in bakus if _normalized_bakugan_name_key(b.name) == target)
+
+
+def _profile_collection_named_match_count(profile: PlayerProfile, target_key: Optional[str]) -> int:
+    if not target_key:
+        return 0
+    return sum(1 for b in getattr(profile, 'collection_bakugan', []) if _normalized_bakugan_name_key(b.name) == target_key)
+
+
+def _team_has_named_gold_pair(gates: Optional[List[GateCard]], target_key: Optional[str]) -> bool:
+    if not gates or not target_key:
+        return False
+    return any(
+        getattr(g, 'gate_type', None) == GateType.GOLD and _gate_named_target_key_for_scoring(g) == target_key
+        for g in gates
+    )
+
+
+def _team_named_combo_strength(profile: PlayerProfile, target_key: Optional[str], bakus: Optional[List[Bakugan]],
+                               gates: Optional[List[GateCard]], smartness: float, named_amount: int = 0) -> float:
+    if not target_key or not bakus:
+        return 0.0
+    matching_bakus = [b for b in bakus if _normalized_bakugan_name_key(b.name) == target_key]
+    if not matching_bakus:
+        return 0.0
+    team_n = max(1, len(bakus))
+    match_ratio = len(matching_bakus) / team_n
+    best_named_gate_bonus = 0
+    if gates:
+        best_named_gate_bonus = max((g.bonuses.get(b.attribute, 0) for g in gates for b in matching_bakus), default=0)
+    has_named_gold_pair = _team_has_named_gold_pair(gates, target_key)
+    combo = len(matching_bakus) * (180 + 170 * smartness)
+    combo += match_ratio * (130 + 170 * smartness)
+    combo += named_amount * (0.62 + 0.50 * smartness)
+    combo += best_named_gate_bonus * (0.75 + 0.65 * smartness)
+    if has_named_gold_pair:
+        combo += 520 + 620 * smartness
+        combo += named_amount * (1.20 + 0.95 * smartness)
+        combo += best_named_gate_bonus * (1.55 + 1.10 * smartness)
+    return combo
+
+
+def _full_named_package_count(bakus: Optional[List[Bakugan]], gates: Optional[List[GateCard]], abilities: Optional[List[AbilityCard]]) -> int:
+    if not bakus or not gates or not abilities:
+        return 0
+    team_keys = {_normalized_bakugan_name_key(getattr(b, 'name', '')) for b in bakus}
+    gold_keys = {
+        _gate_named_target_key_for_scoring(g)
+        for g in gates
+        if getattr(g, 'gate_type', None) == GateType.GOLD and _gate_named_target_key_for_scoring(g)
+    }
+    ability_keys = {
+        _named_power_strike_target_key(a)
+        for a in abilities
+        if _named_power_strike_target_key(a)
+    }
+    return len([k for k in team_keys if k and k in gold_keys and k in ability_keys])
+
+
+def _projected_named_gold_value(profile: PlayerProfile, bakus: Optional[List[Bakugan]]) -> float:
+    if not bakus:
+        return 0.0
+    total = 0.0
+    for b in bakus:
+        matching = [g for g in getattr(profile, 'collection_gates', []) if getattr(g, 'gate_type', None) == GateType.GOLD and _gate_targets_bakugan_name(g, b)]
+        if not matching:
+            continue
+        best_bonus = max((g.bonuses.get(b.attribute, 0) for g in matching), default=0)
+        total += best_bonus * 2.1 + 34
+    return total
+
+
 def gate_profile_value(profile: PlayerProfile, gate: GateCard, active_bakus: Optional[List[Bakugan]] = None, meta: Optional[Dict[str, object]] = None, intelligence_override: Optional[float] = None) -> float:
     smartness = clamp(intelligence_override if intelligence_override is not None else profile.intelligence, 0.2, 0.99)
     bakus = active_bakus if active_bakus is not None else (profile.active_bakugan() or profile.collection_bakugan[:3])
@@ -4401,9 +5315,13 @@ def gate_profile_value(profile: PlayerProfile, gate: GateCard, active_bakus: Opt
     used_abilities = min(4, len(profile.active_ability_idx))
     named_double_hits = _gate_named_double_bonus_count(gate, bakus)
     if named_double_hits:
-        best_named_bonus = max((max(gate.bonuses.get(attr, 0) for attr in [*all_attributes()]) for _ in range(1)), default=0)
-        total += named_double_hits * (28 + best_named_bonus * (0.18 + 0.18 * smartness))
-        total += named_double_hits * (10 + 18 * smartness)
+        best_named_bonus = max((gate.bonuses.get(b.attribute, 0) for b in bakus if _gate_targets_bakugan_name(gate, b)), default=max(gate.bonuses.values()) if gate.bonuses else 0)
+        total += named_double_hits * (42 + best_named_bonus * (0.26 + 0.20 * smartness))
+        total += named_double_hits * (18 + 24 * smartness)
+        total += named_double_hits * (150 + 170 * smartness)
+        total += best_named_bonus * (0.70 + 0.55 * smartness)
+    elif getattr(gate, 'effect_id', '') == 'GATE_DOUBLE_BONUS_NAMED':
+        total -= 60 + 110 * smartness
     if effect_id == 'GATE_EXACT_DOUBLE_ABILITY_BOOSTS':
         total += 26 + used_abilities * (9 + 5 * smartness)
     elif effect_id == 'GATE_EXACT_NO_ABILITIES':
@@ -4573,6 +5491,7 @@ def ability_role_need(profile: PlayerProfile, chosen: List[AbilityCard]) -> Dict
 
 def loadout_upgrade_delta(profile: PlayerProfile, candidate, category: str, meta: Optional[Dict[str, object]] = None) -> float:
     smartness = clamp(profile.intelligence, 0.2, 0.99)
+    very_low_int = smartness <= 0.32
     active_bakus = profile.active_bakugan() or profile.collection_bakugan[:3]
     active_gates = profile.active_gates() or profile.collection_gates[:3]
     if category == "baku":
@@ -4609,6 +5528,17 @@ def ability_live_rate(profile: PlayerProfile, ability: AbilityCard, active_bakus
     eid = ability.effect_id
     team_n = max(1, len(bakus))
     gate_n = max(1, len(gates))
+
+    named_target = _named_power_strike_target_key(ability)
+    if named_target is not None:
+        match_ratio = _named_power_strike_match_count(ability, bakus) / team_n
+        if match_ratio <= 0.0:
+            return 0.0
+        named_gold_pair = any(
+            getattr(g, "gate_type", None) == GateType.GOLD and _gate_named_target_key_for_scoring(g) == named_target
+            for g in gates
+        )
+        return clamp(match_ratio + (0.30 if named_gold_pair else 0.12), 0.0, 1.0)
 
     if eid in {"EXACT_AQUOS_SWAP", "EXACT_AQUOS_ONLY"}:
         return sum(1 for a in attrs if a == Attribute.AQUOS) / team_n
@@ -4726,7 +5656,8 @@ def ability_gate_synergy_score(profile: PlayerProfile, ability: AbilityCard, act
 
 def ability_is_live_for_team(profile: PlayerProfile, ability: AbilityCard, active_bakus: Optional[List[Bakugan]] = None,
                              active_gates: Optional[List[GateCard]] = None) -> bool:
-    return ability_live_rate(profile, ability, active_bakus, active_gates) >= 0.20
+    threshold = 0.35 if ability.color == AbilityColor.GREEN else 0.20
+    return ability_live_rate(profile, ability, active_bakus, active_gates) >= threshold
 
 
 def ability_profile_value(profile: PlayerProfile, ability: AbilityCard, active_bakus: Optional[List[Bakugan]] = None,
@@ -4756,6 +5687,26 @@ def ability_profile_value(profile: PlayerProfile, ability: AbilityCard, active_b
     if any(k in text_blob for k in ['gate', 'ability used', 'used ability', 'standing', 'battle']):
         base += 4 + 4 * smartness
 
+    named_target = _named_power_strike_target_key(ability)
+    if named_target is not None:
+        named_hits = _named_power_strike_match_count(ability, bakus)
+        named_amount = _named_power_strike_amount(ability)
+        collection_hits = _profile_collection_named_match_count(profile, named_target)
+        combo_strength = _team_named_combo_strength(profile, named_target, bakus, gates, smartness, named_amount)
+        if named_hits:
+            base += named_hits * (32 + named_amount * (0.16 + 0.10 * smartness))
+            base += combo_strength
+            if _team_has_named_gold_pair(gates, named_target):
+                base += 180 + 160 * smartness
+        else:
+            dead_penalty = 88 + 190 * smartness
+            if ability.color == AbilityColor.GREEN:
+                dead_penalty += 90 + 150 * smartness
+            dead_penalty += 160 + 220 * smartness
+            base -= dead_penalty
+        if collection_hits:
+            base += min(3, collection_hits) * (4 + 4 * smartness)
+
     live_rate = ability_live_rate(profile, ability, bakus, gates)
     ceiling = ability_ceiling_score(profile, ability, bakus, gates, meta)
     gate_synergy = ability_gate_synergy_score(profile, ability, bakus, gates, meta)
@@ -4769,9 +5720,16 @@ def ability_profile_value(profile: PlayerProfile, ability: AbilityCard, active_b
     score += ctx["finisher"] * (0.18 + 0.10 * profile.aggression)
 
     if live_rate <= 0.0:
-        return -120 - 320 * smartness
-    if live_rate < 0.20:
-        score -= (0.20 - live_rate) * (90 + 180 * smartness)
+        zero_floor = -120 - 320 * smartness
+        if ability.color == AbilityColor.GREEN:
+            zero_floor -= 220 + 220 * smartness
+        return zero_floor
+    live_threshold = 0.35 if ability.color == AbilityColor.GREEN else 0.20
+    if live_rate < live_threshold:
+        penalty = (live_threshold - live_rate) * (90 + 180 * smartness)
+        if ability.color == AbilityColor.GREEN:
+            penalty *= 1.8
+        score -= penalty
     score += live_rate * (24 + 34 * smartness)
 
     if ability.effect_id == "EXACT_DARKUS_ONLY":
@@ -5070,6 +6028,7 @@ def choose_weighted_category(rng: random.Random, categories: List[Tuple[float, s
 def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, object]] = None, rng: Optional[random.Random] = None) -> None:
     rng = rng or random.Random()
     smartness = clamp(profile.intelligence, 0.2, 0.99)
+    very_low_int = smartness <= 0.32
     if not getattr(profile, "archetype", None):
         profile.archetype = derive_archetype_for_profile(profile, rng)
 
@@ -5096,11 +6055,13 @@ def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, ob
         score += unique_attrs * 18 * w["coverage"]
         gate_synergy = 0.0
         named_gate_hits = 0
+        projected_named_gold = _projected_named_gold_value(profile, team)
         for b in team:
             gate_synergy += max((g.bonuses.get(b.attribute, 0) for g in profile.collection_gates), default=0)
             named_gate_hits += sum(1 for g in profile.collection_gates if _gate_targets_bakugan_name(g, b))
         score += gate_synergy * 0.18 * w["synergy"]
         score += named_gate_hits * (10 + 10 * smartness)
+        score += projected_named_gold * (0.26 + 0.18 * smartness) * w["synergy"]
         sorted_g = sorted((b.base_g for b in team), reverse=True)
         if len(sorted_g) == 3:
             score += sorted_g[0] * 0.08 + sorted_g[1] * 0.05 + min(sorted_g[2], 560) * 0.03
@@ -5147,6 +6108,27 @@ def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, ob
             score += gate_profile_value(profile, gate, active_bakus=active_bakus, meta=meta, intelligence_override=smartness)
             score += gate_profile_archetype_bonus(profile, gate, active_bakus, meta=meta, intelligence_override=smartness)
             seen_tags |= gate_tags(gate)
+        named_gold_hits = sum(_gate_named_double_bonus_count(g, active_bakus) for g in chosen if g.gate_type == GateType.GOLD)
+        named_gold_value = 0.0
+        named_gate_targets = set()
+        for gate in chosen:
+            if gate.gate_type != GateType.GOLD:
+                continue
+            named_gate_targets.add(_gate_named_target_key_for_scoring(gate))
+            for baku in active_bakus:
+                if _gate_targets_bakugan_name(gate, baku):
+                    named_gold_value += gate.bonuses.get(baku.attribute, 0) * 2.2 + 36
+        named_ability_pairs = 0
+        for ability in getattr(profile, 'collection_abilities', []):
+            target = _named_power_strike_target_key(ability)
+            if target and target in named_gate_targets and any(_normalized_bakugan_name_key(b.name) == target for b in active_bakus):
+                named_ability_pairs += 1
+        score += named_gold_hits * (54 + 36 * smartness) * profile_archetype_weights(profile)["synergy"]
+        score += named_gold_value * (0.36 + 0.24 * smartness) * profile_archetype_weights(profile)["synergy"]
+        score += min(3, named_ability_pairs) * (34 + 26 * smartness) * profile_archetype_weights(profile)["synergy"]
+        score += named_gold_hits * (170 + 190 * smartness) * profile_archetype_weights(profile)["synergy"]
+        if named_gold_hits == 0 and any(getattr(g, 'effect_id', '') == 'GATE_DOUBLE_BONUS_NAMED' for g in chosen if g.gate_type == GateType.GOLD):
+            score -= (120 + 180 * smartness) * profile_archetype_weights(profile)["synergy"]
         score += len(seen_tags) * 8 * profile_archetype_weights(profile)["coverage"]
         score += rng.uniform(-12, 12) * (1.0 - smartness)
         return score
@@ -5154,9 +6136,63 @@ def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, ob
     chosen_gates = list(max(gate_combos, key=gate_triplet_score)) if gate_combos else [lst[0] for lst in [gold_sorted, silver_sorted, bronze_sorted] if lst][:3]
     active_gates = [profile.collection_gates[i] for i in chosen_gates]
 
+    def refine_baku_triplet_with_chosen_gates(initial_combo: List[int]) -> List[int]:
+        candidate_indices = list(dict.fromkeys(initial_combo + baku_ranked[:min(len(baku_ranked), 12)]))
+        combos = list(combinations(candidate_indices, 3)) if len(candidate_indices) >= 3 else [tuple(initial_combo)]
+        def score_combo(combo: Tuple[int, int, int]) -> float:
+            team = [profile.collection_bakugan[i] for i in combo]
+            w_local = profile_archetype_weights(profile)
+            score_local = 0.0
+            for baku in team:
+                score_local += bakugan_profile_value(profile, baku, active_gates=active_gates, meta=meta, intelligence_override=smartness)
+                best_gate_bonus = max((g.bonuses.get(baku.attribute, 0) for g in active_gates), default=0)
+                score_local += best_gate_bonus * (0.32 + 0.18 * smartness)
+            named_gold_pairs = 0
+            named_gold_value = 0.0
+            for gate in active_gates:
+                if gate.gate_type != GateType.GOLD:
+                    continue
+                for baku in team:
+                    if _gate_targets_bakugan_name(gate, baku):
+                        named_gold_pairs += 1
+                        named_gold_value += gate.bonuses.get(baku.attribute, 0) * 2.5 + 44
+            unique_attrs = len({b.attribute for b in team})
+            score_local += unique_attrs * 14 * w_local["coverage"]
+            score_local += named_gold_pairs * (54 + 30 * smartness) * w_local["synergy"]
+            score_local += named_gold_value * (0.30 + 0.20 * smartness) * w_local["synergy"]
+            score_local += named_gold_pairs * (180 + 180 * smartness) * w_local["synergy"]
+            score_local += rng.uniform(-10, 10) * (1.0 - smartness)
+            return score_local
+        return list(max(combos, key=score_combo)) if combos else list(initial_combo)
+
+    chosen_baku = refine_baku_triplet_with_chosen_gates(chosen_baku)
+    active_bakus = [profile.collection_bakugan[i] for i in chosen_baku]
+
     def top_by_color(color: AbilityColor, limit: int = 8) -> List[int]:
         typed = [i for i, a in enumerate(profile.collection_abilities) if a.color == color]
-        if smartness >= 0.72:
+        if color == AbilityColor.GREEN:
+            strict_green_threshold = 0.35 if very_low_int else 0.15
+            live_green = [i for i in typed if ability_live_rate(profile, profile.collection_abilities[i], active_bakus, active_gates) >= strict_green_threshold]
+            if live_green and not very_low_int:
+                typed = live_green
+            elif live_green and smartness >= 0.60:
+                typed = list(dict.fromkeys(live_green + typed))
+            matching_named_full = [
+                i for i in typed
+                if _named_power_strike_match_count(profile.collection_abilities[i], active_bakus) > 0
+                and ability_is_live_for_team(profile, profile.collection_abilities[i], active_bakus, active_gates)
+                and _team_has_named_gold_pair(active_gates, _named_power_strike_target_key(profile.collection_abilities[i]))
+            ]
+            matching_named_live = [
+                i for i in typed
+                if _named_power_strike_match_count(profile.collection_abilities[i], active_bakus) > 0
+                and ability_is_live_for_team(profile, profile.collection_abilities[i], active_bakus, active_gates)
+            ]
+            if matching_named_full:
+                typed = list(dict.fromkeys(matching_named_full + matching_named_live + typed))
+            elif matching_named_live:
+                typed = list(dict.fromkeys(matching_named_live + typed))
+        elif smartness >= 0.72:
             live_typed = [i for i in typed if ability_live_rate(profile, profile.collection_abilities[i], active_bakus, active_gates) >= 0.20]
             if live_typed:
                 typed = live_typed
@@ -5208,6 +6244,29 @@ def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, ob
         score += avg_live * (25 + 40 * smartness)
         score += min_live * (8 + 25 * smartness)
         score += len(seen_tags) * 8 * w["coverage"]
+        named_green_hits = 0
+        named_green_gold_pairs = 0
+        named_green_exact_value = 0.0
+        for ability in chosen:
+            named_target = _named_power_strike_target_key(ability)
+            if named_target is None:
+                continue
+            hits = _named_power_strike_match_count(ability, active_bakus)
+            named_green_hits += hits
+            amount = _named_power_strike_amount(ability)
+            for baku in active_bakus:
+                if _normalized_bakugan_name_key(baku.name) == named_target:
+                    named_green_exact_value += amount
+                    if any(_gate_named_target_key_for_scoring(g) == named_target for g in active_gates if g.gate_type == GateType.GOLD):
+                        named_green_gold_pairs += 1
+                        named_green_exact_value += amount * 0.85 + 40
+        full_named_packages = _full_named_package_count(active_bakus, active_gates, chosen)
+        score += named_green_hits * (52 + 40 * smartness)
+        score += named_green_exact_value * (0.34 + 0.26 * smartness) * w["synergy"]
+        score += named_green_gold_pairs * (140 + 90 * smartness) * w["synergy"]
+        score += named_green_hits * (240 + 250 * smartness) * w["synergy"]
+        score += named_green_gold_pairs * (520 + 540 * smartness) * w["synergy"]
+        score += full_named_packages * (1400 + 1800 * smartness) * w["synergy"]
         if role_counts["raw_power"] > 0:
             score += 10 * w["ability_raw_power"]
         if role_counts["disruption"] > 0:
@@ -5225,10 +6284,22 @@ def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, ob
         score += ctx_totals["strategy"] * (0.20 + 0.18 * smartness) * needs["strategy"]
 
         dead_count = sum(1 for lr in live_rates if lr < 0.20)
+        dead_green_count = sum(1 for ability, lr in zip(chosen, live_rates) if ability.color == AbilityColor.GREEN and lr < 0.35)
+        dead_named_green_count = sum(
+            1
+            for ability, lr in zip(chosen, live_rates)
+            if ability.color == AbilityColor.GREEN and _named_power_strike_target_key(ability) and lr < 0.35
+        )
         if dead_count:
-            score -= dead_count * (40 + 120 * smartness)
+            score -= dead_count * (60 + 170 * smartness)
+        if dead_green_count:
+            score -= dead_green_count * (220 + 460 * smartness)
+        if dead_named_green_count:
+            score -= dead_named_green_count * (4200 + 5200 * smartness) * w["synergy"]
+            if not very_low_int:
+                score -= dead_named_green_count * (2600 + 3400 * smartness)
         if min_live <= 0.0:
-            score -= 120 + 220 * smartness
+            score -= 220 + 420 * smartness
 
         gate_text = " ".join(g.effect_id for g in active_gates)
         if profile.archetype == PlayerArchetype.COMBO_SETUP and ("ABILITY_USED_SCALING" in gate_text or "DOUBLE_ABILITY_BOOSTS" in gate_text):
@@ -5242,30 +6313,188 @@ def optimise_profile_loadout(profile: PlayerProfile, meta: Optional[Dict[str, ob
 
     chosen_abilities = list(max(ability_combos, key=ability_triplet_score)) if ability_combos else [lst[0] for lst in [red_sorted, blue_sorted, green_sorted] if lst][:3]
 
-    # Post-selection sanity pass: replace dead abilities with the best live same-colour option.
-    chosen_set = set(chosen_abilities)
-    for pos, idx in enumerate(list(chosen_abilities)):
-        ability = profile.collection_abilities[idx]
-        if ability_is_live_for_team(profile, ability, active_bakus, active_gates):
-            continue
-        same_colour = [
-            i for i, a in enumerate(profile.collection_abilities)
-            if a.color == ability.color and (i == idx or i not in chosen_set)
-        ]
-        same_colour.sort(
-            key=lambda i: ability_profile_value(
-                profile, profile.collection_abilities[i], active_bakus=active_bakus, active_gates=active_gates, meta=meta, intelligence_override=smartness
-            ) + ability_profile_archetype_bonus(
-                profile, profile.collection_abilities[i], active_bakus, active_gates=active_gates, meta=meta, intelligence_override=smartness
-            ),
-            reverse=True,
+    def rebuild_cards_for_team(team_indices: List[int]) -> Tuple[List[int], List[int]]:
+        team_bakus = [profile.collection_bakugan[i] for i in team_indices]
+        def top_by_type_for_team(gate_type: GateType, limit: int = 8) -> List[int]:
+            typed = [i for i, g in enumerate(profile.collection_gates) if g.gate_type == gate_type]
+            typed.sort(
+                key=lambda i: gate_profile_value(profile, profile.collection_gates[i], active_bakus=team_bakus, meta=meta, intelligence_override=smartness)
+                + gate_profile_archetype_bonus(profile, profile.collection_gates[i], team_bakus, meta=meta, intelligence_override=smartness),
+                reverse=True,
+            )
+            return typed[:min(limit, len(typed))]
+        gold_local = top_by_type_for_team(GateType.GOLD)
+        silver_local = top_by_type_for_team(GateType.SILVER)
+        bronze_local = top_by_type_for_team(GateType.BRONZE)
+        gate_combos_local = [(g, s, b) for g in gold_local for s in silver_local for b in bronze_local]
+        chosen_gates_local = list(max(gate_combos_local, key=gate_triplet_score)) if gate_combos_local else [lst[0] for lst in [gold_local, silver_local, bronze_local] if lst][:3]
+        team_gates = [profile.collection_gates[i] for i in chosen_gates_local]
+        def top_by_color_for_team(color: AbilityColor, limit: int = 10) -> List[int]:
+            typed = [i for i, a in enumerate(profile.collection_abilities) if a.color == color]
+            if color == AbilityColor.GREEN:
+                strict_green_threshold = 0.35 if very_low_int else 0.15
+                live_green = [i for i in typed if ability_live_rate(profile, profile.collection_abilities[i], team_bakus, team_gates) >= strict_green_threshold]
+                if live_green and not very_low_int:
+                    typed = live_green
+                elif live_green and smartness >= 0.60:
+                    typed = list(dict.fromkeys(live_green + typed))
+                matching_named_full = [
+                    i for i in typed
+                    if _named_power_strike_match_count(profile.collection_abilities[i], team_bakus) > 0
+                    and ability_is_live_for_team(profile, profile.collection_abilities[i], team_bakus, team_gates)
+                    and _team_has_named_gold_pair(team_gates, _named_power_strike_target_key(profile.collection_abilities[i]))
+                ]
+                matching_named_live = [
+                    i for i in typed
+                    if _named_power_strike_match_count(profile.collection_abilities[i], team_bakus) > 0
+                    and ability_is_live_for_team(profile, profile.collection_abilities[i], team_bakus, team_gates)
+                ]
+                if matching_named_full:
+                    typed = list(dict.fromkeys(matching_named_full + matching_named_live + typed))
+                elif matching_named_live:
+                    typed = list(dict.fromkeys(matching_named_live + typed))
+            elif smartness >= 0.72:
+                live_typed = [i for i in typed if ability_live_rate(profile, profile.collection_abilities[i], team_bakus, team_gates) >= 0.20]
+                if live_typed:
+                    typed = live_typed
+            typed.sort(
+                key=lambda i: ability_profile_value(
+                    profile, profile.collection_abilities[i], active_bakus=team_bakus, active_gates=team_gates, meta=meta, intelligence_override=smartness
+                ) + ability_profile_archetype_bonus(
+                    profile, profile.collection_abilities[i], team_bakus, active_gates=team_gates, meta=meta, intelligence_override=smartness
+                ) + 0.20 * sum(ability_context_scores(profile, profile.collection_abilities[i], team_bakus, team_gates, meta).values()),
+                reverse=True,
+            )
+            return typed[:min(limit, len(typed))]
+        red_local = top_by_color_for_team(AbilityColor.RED)
+        blue_local = top_by_color_for_team(AbilityColor.BLUE)
+        green_local = top_by_color_for_team(AbilityColor.GREEN)
+        ability_combos_local = [(r, b, g) for r in red_local for b in blue_local for g in green_local]
+        chosen_abilities_local = list(max(ability_combos_local, key=ability_triplet_score)) if ability_combos_local else [lst[0] for lst in [red_local, blue_local, green_local] if lst][:3]
+        return chosen_gates_local[:3], chosen_abilities_local[:3]
+
+    def _ability_candidate_final_score(candidate_idx: int, team_bakus: List[Bakugan], team_gates: List[GateCard], current_choices: List[int], replace_pos: int) -> float:
+        candidate = profile.collection_abilities[candidate_idx]
+        trial = [profile.collection_abilities[i] for i in current_choices]
+        if replace_pos < len(trial):
+            trial[replace_pos] = candidate
+        live_rate = ability_live_rate(profile, candidate, team_bakus, team_gates)
+        score = ability_profile_value(
+            profile, candidate, active_bakus=team_bakus, active_gates=team_gates, meta=meta, intelligence_override=smartness
         )
-        for cand in same_colour:
-            if ability_is_live_for_team(profile, profile.collection_abilities[cand], active_bakus, active_gates):
-                chosen_set.discard(idx)
-                chosen_abilities[pos] = cand
-                chosen_set.add(cand)
+        score += ability_profile_archetype_bonus(
+            profile, candidate, team_bakus, active_gates=team_gates, meta=meta, intelligence_override=smartness
+        )
+        score += live_rate * (80 + 120 * smartness)
+        named_target = _named_power_strike_target_key(candidate)
+        if candidate.color == AbilityColor.GREEN:
+            if live_rate >= 0.35:
+                score += 220 + 260 * smartness
+            else:
+                score -= 900 + 1300 * smartness
+            if named_target:
+                if _named_power_strike_match_count(candidate, team_bakus) > 0 and ability_is_live_for_team(profile, candidate, team_bakus, team_gates):
+                    score += 900 + 1100 * smartness
+                    if _team_has_named_gold_pair(team_gates, named_target):
+                        score += 3200 + 4200 * smartness
+                else:
+                    score -= 5200 + 7000 * smartness
+                    if not very_low_int:
+                        score -= 4000 + 4500 * smartness
+        elif live_rate <= 0.0:
+            score -= 200 + 260 * smartness
+        score += _full_named_package_count(team_bakus, team_gates, trial) * (1800 + 2400 * smartness)
+        return score
+
+    def _run_final_ability_checks(team_bakus: List[Bakugan], team_gates: List[GateCard], chosen_abilities_in: List[int], passes: int = 4) -> List[int]:
+        chosen = list(chosen_abilities_in[:3])
+        for _ in range(max(2, passes)):
+            used = set(chosen)
+            changed = False
+            green_positions = [pos for pos, idx in enumerate(chosen) if profile.collection_abilities[idx].color == AbilityColor.GREEN]
+            for pos in green_positions:
+                current_idx = chosen[pos]
+                current_ability = profile.collection_abilities[current_idx]
+                current_live = ability_live_rate(profile, current_ability, team_bakus, team_gates)
+                named_full = []
+                named_live = []
+                live_green = []
+                fallback_green = []
+                for i, ability in enumerate(profile.collection_abilities):
+                    if ability.color != AbilityColor.GREEN:
+                        continue
+                    if i != current_idx and i in used:
+                        continue
+                    live_rate = ability_live_rate(profile, ability, team_bakus, team_gates)
+                    if live_rate >= 0.35:
+                        live_green.append(i)
+                    named_target = _named_power_strike_target_key(ability)
+                    if named_target and _named_power_strike_match_count(ability, team_bakus) > 0 and ability_is_live_for_team(profile, ability, team_bakus, team_gates):
+                        named_live.append(i)
+                        if _team_has_named_gold_pair(team_gates, named_target):
+                            named_full.append(i)
+                    fallback_green.append(i)
+                if named_full:
+                    pool = named_full
+                elif named_live:
+                    pool = named_live + [i for i in live_green if i not in named_live]
+                elif live_green:
+                    pool = live_green
+                else:
+                    pool = fallback_green if very_low_int else []
+                if not pool:
+                    continue
+                if current_ability.color == AbilityColor.GREEN and _named_power_strike_target_key(current_ability) and live_rate < 0.35 and not very_low_int:
+                    pool = [i for i in pool if ability_live_rate(profile, profile.collection_abilities[i], team_bakus, team_gates) >= 0.15] or pool
+                best_idx = max(pool, key=lambda i: _ability_candidate_final_score(i, team_bakus, team_gates, chosen, pos))
+                if best_idx != current_idx:
+                    chosen[pos] = best_idx
+                    used = set(chosen)
+                    changed = True
+                elif _named_power_strike_target_key(current_ability) and current_live < 0.35 and live_green and not very_low_int:
+                    best_live_idx = max(live_green, key=lambda i: _ability_candidate_final_score(i, team_bakus, team_gates, chosen, pos))
+                    if best_live_idx != current_idx:
+                        chosen[pos] = best_live_idx
+                        used = set(chosen)
+                        changed = True
+            used = set(chosen)
+            for pos, current_idx in enumerate(list(chosen)):
+                current_ability = profile.collection_abilities[current_idx]
+                live_rate = ability_live_rate(profile, current_ability, team_bakus, team_gates)
+                must_fix = live_rate <= 0.0 or (current_ability.color == AbilityColor.GREEN and live_rate < 0.35 and not very_low_int)
+                if not must_fix:
+                    continue
+                pool = []
+                for i, ability in enumerate(profile.collection_abilities):
+                    if ability.color != current_ability.color:
+                        continue
+                    if i != current_idx and i in used:
+                        continue
+                    if current_ability.color != AbilityColor.GREEN and ability_live_rate(profile, ability, team_bakus, team_gates) <= 0.0:
+                        continue
+                    pool.append(i)
+                if not pool:
+                    continue
+                best_idx = max(pool, key=lambda i: _ability_candidate_final_score(i, team_bakus, team_gates, chosen, pos))
+                if best_idx != current_idx:
+                    chosen[pos] = best_idx
+                    used = set(chosen)
+                    changed = True
+            if not changed:
                 break
+        return chosen[:3]
+
+    chosen_gates, chosen_abilities = rebuild_cards_for_team(chosen_baku)
+    active_gates = [profile.collection_gates[i] for i in chosen_gates]
+    chosen_abilities = _run_final_ability_checks(active_bakus, active_gates, chosen_abilities, passes=4)
+
+    second_pass_baku = refine_baku_triplet_with_chosen_gates(chosen_baku)
+    if tuple(second_pass_baku) != tuple(chosen_baku):
+        chosen_baku = second_pass_baku
+        active_bakus = [profile.collection_bakugan[i] for i in chosen_baku]
+    chosen_gates, chosen_abilities = rebuild_cards_for_team(chosen_baku)
+    active_gates = [profile.collection_gates[i] for i in chosen_gates]
+    chosen_abilities = _run_final_ability_checks(active_bakus, active_gates, chosen_abilities, passes=5)
 
     profile.active_bakugan_idx = chosen_baku[:3]
     profile.active_gate_idx = chosen_gates[:3]
@@ -5444,6 +6673,7 @@ def npc_market_progression(profile: PlayerProfile, rng: random.Random, templates
     before_loadout = (tuple(profile.active_bakugan_idx), tuple(profile.active_gate_idx), tuple(profile.active_ability_idx))
     optimise_profile_loadout(profile, meta=meta, rng=rng)
     smartness = clamp(profile.intelligence, 0.2, 0.99)
+    very_low_int = smartness <= 0.32
     reserve_ratio = 0.10 + smartness * 0.22 + (0.12 if profile.glicko.rating > 1650 else 0.0) - profile.risk * 0.10
     if profile.money < 250 and smartness > 0.7:
         reserve_ratio += 0.12
@@ -5462,6 +6692,17 @@ def npc_market_progression(profile: PlayerProfile, rng: random.Random, templates
     if smartness > 0.82:
         purchase_attempts += 1
 
+    active_bakus_now = profile.active_bakugan() or profile.collection_bakugan[:3]
+    active_gates_now = profile.active_gates() or profile.collection_gates[:3]
+    active_abilities_now = profile.active_abilities()
+    has_dead_active_green = any(a.color == AbilityColor.GREEN and ability_live_rate(profile, a, active_bakus_now, active_gates_now) < 0.35 for a in active_abilities_now)
+    has_dead_active_card = any((a.color == AbilityColor.GREEN and ability_live_rate(profile, a, active_bakus_now, active_gates_now) < 0.35) or (a.color != AbilityColor.GREEN and ability_live_rate(profile, a, active_bakus_now, active_gates_now) <= 0.0) for a in active_abilities_now)
+    if has_dead_active_green and not very_low_int:
+        purchase_attempts += 2
+        reserve = max(40, int(reserve * 0.6))
+    elif has_dead_active_card and not very_low_int:
+        purchase_attempts += 1
+
     meta_attr = meta.get("dominant_attr") if meta else None
 
     def baku_value(t: BakuganTemplate) -> float:
@@ -5477,17 +6718,50 @@ def npc_market_progression(profile: PlayerProfile, rng: random.Random, templates
         value = gate_profile_value(profile, g, active_bakus=active_bakus, meta=meta, intelligence_override=smartness)
         value += gate_profile_archetype_bonus(profile, g, active_bakus, meta=meta, intelligence_override=smartness)
         value += loadout_upgrade_delta(profile, g, "gate", meta) * (0.80 + 0.45 * smartness)
+        if g.gate_type == GateType.GOLD:
+            named_hits = _gate_named_double_bonus_count(g, getattr(profile, 'collection_bakugan', []))
+            if named_hits:
+                value += named_hits * (18 + 16 * smartness)
         value -= card_shop_price(g) * (0.18 + 0.12 * smartness) / max(0.75, profile_archetype_weights(profile)["economy"])
         return value
 
     def ability_value(a: AbilityCard) -> float:
         active_bakus = profile.active_bakugan() or profile.collection_bakugan[:3]
         active_gates = profile.active_gates() or profile.collection_gates[:3]
+        current_green_dead = False
+        current_green = next((x for x in active_gates and []), None)
+        active_green = next((x for x in profile.active_abilities() if x.color == AbilityColor.GREEN), None)
+        if active_green is not None:
+            current_green_dead = not ability_is_live_for_team(profile, active_green, active_bakus, active_gates)
         value = ability_profile_value(profile, a, active_bakus=active_bakus, active_gates=active_gates, meta=meta, intelligence_override=smartness)
         value += ability_profile_archetype_bonus(profile, a, active_bakus, active_gates=active_gates, meta=meta, intelligence_override=smartness)
         value += loadout_upgrade_delta(profile, a, "ability", meta) * (0.90 + 0.55 * smartness)
+        named_target = _named_power_strike_target_key(a)
+        if named_target is not None:
+            collection_hits = _profile_collection_named_match_count(profile, named_target)
+            if collection_hits:
+                value += min(3, collection_hits) * (8 + 8 * smartness)
+                if any(_gate_named_target_key_for_scoring(g) == named_target for g in getattr(profile, 'collection_gates', []) if g.gate_type == GateType.GOLD):
+                    value += 24 + 18 * smartness
+                if any(_normalized_bakugan_name_key(b.name) == named_target for b in active_bakus):
+                    value += 70 + 90 * smartness
+                    if any(_gate_named_target_key_for_scoring(g) == named_target for g in active_gates if g.gate_type == GateType.GOLD):
+                        value += 260 + 340 * smartness
         if smartness >= 0.75 and not ability_is_live_for_team(profile, a, active_bakus, active_gates):
             value -= 80 + 90 * smartness
+        if a.color == AbilityColor.GREEN:
+            if not ability_is_live_for_team(profile, a, active_bakus, active_gates):
+                value -= 180 + 170 * smartness
+                if _named_power_strike_target_key(a) is not None:
+                    value -= 1200 + 1600 * smartness
+                    if not very_low_int:
+                        value -= 1800 + 2200 * smartness
+            elif current_green_dead:
+                value += 90 + 110 * smartness
+                if not very_low_int:
+                    value += 280 + 360 * smartness
+        elif current_green_dead and ability_is_live_for_team(profile, a, active_bakus, active_gates):
+            value += 18 + 16 * smartness
         value -= card_shop_price(a) * (0.18 + 0.12 * smartness) / max(0.75, profile_archetype_weights(profile)["economy"])
         return value
 
@@ -5636,8 +6910,16 @@ def npc_market_progression(profile: PlayerProfile, rng: random.Random, templates
             if not affordable:
                 continue
             missing_colors = [c for c in AbilityColor if c not in {a.color for a in profile.collection_abilities}]
+            active_bakus_now = profile.active_bakugan() or profile.collection_bakugan[:3]
+            active_gates_now = profile.active_gates() or profile.collection_gates[:3]
+            active_green_now = next((a for a in profile.active_abilities() if a.color == AbilityColor.GREEN), None)
+            green_is_dead_now = active_green_now is not None and not ability_is_live_for_team(profile, active_green_now, active_bakus_now, active_gates_now)
             if missing_colors and smartness > 0.6:
                 affordable = [a for a in affordable if a.color in missing_colors] or affordable
+            if green_is_dead_now:
+                live_green_affordable = [a for a in affordable if a.color == AbilityColor.GREEN and ability_is_live_for_team(profile, a, active_bakus_now, active_gates_now)]
+                if live_green_affordable:
+                    affordable = live_green_affordable
             ranked = sorted(affordable, key=ability_value, reverse=True)
             window = max(1, 7 - int(smartness * 5))
             cand = ranked[rng.randint(0, min(len(ranked)-1, window-1))]
